@@ -1,0 +1,67 @@
+version: '3'
+
+vars:
+  IMAGE_NAME: zig-k8s-client
+  IMAGE_TAG: latest
+  NAMESPACE: default
+
+tasks:
+  build:
+    desc: Build the Zig binary
+    cmds:
+      - zig build -Doptimize=ReleaseSafe
+
+  test:
+    desc: Run tests
+    cmds:
+      - zig build test
+
+  # Container image tasks
+  image:build:
+    desc: Build container image using docker
+    deps: [build]
+    cmds:
+      - docker build -t {{.IMAGE_NAME}}:{{.IMAGE_TAG}} .
+
+  image:load:
+    desc: Load image into kind cluster
+    deps: [image:build]
+    cmds:
+      - kind load docker-image {{.IMAGE_NAME}}:{{.IMAGE_TAG}}
+
+  # Kubernetes deployment tasks
+  k8s:deploy:
+    desc: Deploy to Kubernetes (creates SA, RBAC, and Pod)
+    cmds:
+      - kubectl apply -f manifests/
+
+  k8s:delete:
+    desc: Delete Kubernetes resources
+    cmds:
+      - kubectl delete -f manifests/ --ignore-not-found
+
+  k8s:logs:
+    desc: View pod logs
+    cmds:
+      - kubectl logs -f -l app=zig-k8s-client -n {{.NAMESPACE}}
+
+  k8s:redeploy:
+    desc: Rebuild, reload image, and redeploy
+    cmds:
+      - task: k8s:delete
+      - task: image:load
+      - task: k8s:deploy
+
+  # Development workflow
+  dev:
+    desc: Run locally with kubectl proxy
+    cmds:
+      - kubectl proxy --port=8080 &
+      - sleep 1
+      - KUBECONFIG={{.HOME}}/.kube/config-proxy.json zig build run
+      - pkill -f "kubectl proxy" || true
+
+  clean:
+    desc: Clean build artifacts
+    cmds:
+      - rm -rf zig-out .zig-cache
