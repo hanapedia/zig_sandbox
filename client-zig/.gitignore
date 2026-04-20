@@ -1,0 +1,8 @@
+# Zig build artifacts
+zig-out/
+zig-pkg/
+.zig-cache/
+
+# Proto files and generated code (regenerate with: task proto:all)
+proto/
+src/proto/k8s/

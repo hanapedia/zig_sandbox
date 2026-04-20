@@ -4,6 +4,8 @@ vars:
   IMAGE_NAME: zig-k8s-client
   IMAGE_TAG: latest
   NAMESPACE: default
+  K8S_VERSION: "1.33"
+  PROTO_DIR: proto
 
 tasks:
   build:
@@ -65,3 +67,61 @@ tasks:
     desc: Clean build artifacts
     cmds:
       - rm -rf zig-out .zig-cache
+
+  # Proto generation tasks
+  proto:download:
+    desc: Download Kubernetes proto files from upstream
+    cmds:
+      - mkdir -p {{.PROTO_DIR}}/apimachinery/api/resource
+      - mkdir -p {{.PROTO_DIR}}/apimachinery/apis/meta/v1
+      - mkdir -p {{.PROTO_DIR}}/apimachinery/runtime/schema
+      - mkdir -p {{.PROTO_DIR}}/apimachinery/util/intstr
+      # Download apimachinery protos
+      - curl -sL "https://raw.githubusercontent.com/kubernetes/apimachinery/release-{{.K8S_VERSION}}/pkg/api/resource/generated.proto" -o {{.PROTO_DIR}}/apimachinery/api/resource/generated.proto
+      - curl -sL "https://raw.githubusercontent.com/kubernetes/apimachinery/release-{{.K8S_VERSION}}/pkg/apis/meta/v1/generated.proto" -o {{.PROTO_DIR}}/apimachinery/apis/meta/v1/generated.proto
+      - curl -sL "https://raw.githubusercontent.com/kubernetes/apimachinery/release-{{.K8S_VERSION}}/pkg/runtime/generated.proto" -o {{.PROTO_DIR}}/apimachinery/runtime/generated.proto
+      - curl -sL "https://raw.githubusercontent.com/kubernetes/apimachinery/release-{{.K8S_VERSION}}/pkg/runtime/schema/generated.proto" -o {{.PROTO_DIR}}/apimachinery/runtime/schema/generated.proto
+      - curl -sL "https://raw.githubusercontent.com/kubernetes/apimachinery/release-{{.K8S_VERSION}}/pkg/util/intstr/generated.proto" -o {{.PROTO_DIR}}/apimachinery/util/intstr/generated.proto
+      # Download API protos
+      - curl -sL "https://raw.githubusercontent.com/kubernetes/api/release-{{.K8S_VERSION}}/core/v1/generated.proto" -o {{.PROTO_DIR}}/core_v1_generated.proto
+      - curl -sL "https://raw.githubusercontent.com/kubernetes/api/release-{{.K8S_VERSION}}/apps/v1/generated.proto" -o {{.PROTO_DIR}}/apps_v1_generated.proto
+      - curl -sL "https://raw.githubusercontent.com/kubernetes/api/release-{{.K8S_VERSION}}/batch/v1/generated.proto" -o {{.PROTO_DIR}}/batch_v1_generated.proto
+
+  proto:symlinks:
+    desc: Create symlink structure for proto imports
+    cmds:
+      # Create k8s.io directory structure
+      - mkdir -p {{.PROTO_DIR}}/k8s.io/api/core/v1
+      - mkdir -p {{.PROTO_DIR}}/k8s.io/api/apps/v1
+      - mkdir -p {{.PROTO_DIR}}/k8s.io/api/batch/v1
+      - mkdir -p {{.PROTO_DIR}}/k8s.io/apimachinery/pkg
+      # Create symlinks for API protos
+      - ln -sf ../../../../core_v1_generated.proto {{.PROTO_DIR}}/k8s.io/api/core/v1/generated.proto
+      - ln -sf ../../../../apps_v1_generated.proto {{.PROTO_DIR}}/k8s.io/api/apps/v1/generated.proto
+      - ln -sf ../../../../batch_v1_generated.proto {{.PROTO_DIR}}/k8s.io/api/batch/v1/generated.proto
+      # Create symlink for apimachinery
+      - ln -sf ../../../apimachinery/api {{.PROTO_DIR}}/k8s.io/apimachinery/pkg/api
+      - ln -sf ../../../apimachinery/apis {{.PROTO_DIR}}/k8s.io/apimachinery/pkg/apis
+      - ln -sf ../../../apimachinery/runtime {{.PROTO_DIR}}/k8s.io/apimachinery/pkg/runtime
+      - ln -sf ../../../apimachinery/util {{.PROTO_DIR}}/k8s.io/apimachinery/pkg/util
+
+  proto:generate:
+    desc: Generate Zig code from proto files
+    cmds:
+      - zig build gen-proto
+      # Fix tab characters in generated comments
+      - find src/proto -name "*.pb.zig" -exec sed -i 's/\t/    /g' {} \;
+      - zig fmt src/proto/
+
+  proto:all:
+    desc: Download protos, create symlinks, and generate Zig code
+    cmds:
+      - task: proto:download
+      - task: proto:symlinks
+      - task: proto:generate
+
+  proto:clean:
+    desc: Remove proto files and generated code
+    cmds:
+      - rm -rf {{.PROTO_DIR}}
+      - rm -rf src/proto/k8s

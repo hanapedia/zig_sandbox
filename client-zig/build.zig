@@ -1,4 +1,5 @@
 const std = @import("std");
+const protobuf = @import("protobuf");
 
 // Although this function looks imperative, it does not perform the build
 // directly and instead it mutates the build graph (`b`) that will be then
@@ -28,6 +29,13 @@ pub fn build(b: *std.Build) void {
     });
     const tls_mod = tls_dep.module("tls");
 
+    // Import the protobuf dependency
+    const protobuf_dep = b.dependency("protobuf", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    const protobuf_mod = protobuf_dep.module("protobuf");
+
     // This creates a module, which represents a collection of source files alongside
     // some compilation options, such as optimization mode and linked system libraries.
     // Zig modules are the preferred way of making Zig code available to consumers.
@@ -48,6 +56,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .imports = &.{
             .{ .name = "tls", .module = tls_mod },
+            .{ .name = "protobuf", .module = protobuf_mod },
         },
     });
 
@@ -90,6 +99,7 @@ pub fn build(b: *std.Build) void {
                 // importing modules from different packages).
                 .{ .name = "client_zig", .module = mod },
                 .{ .name = "tls", .module = tls_mod },
+                .{ .name = "protobuf", .module = protobuf_mod },
             },
         }),
     });
@@ -164,4 +174,31 @@ pub fn build(b: *std.Build) void {
     //
     // Lastly, the Zig build system is relatively simple and self-contained,
     // and reading its source code will allow you to master it.
+
+    // Proto code generation step
+    const gen_proto_step = b.step("gen-proto", "Generate Zig code from protobuf definitions");
+
+    // Define proto source files in dependency order
+    const proto_files: []const std.Build.LazyPath = &.{
+        // Base runtime types (no dependencies)
+        b.path("proto/k8s.io/apimachinery/pkg/runtime/generated.proto"),
+        b.path("proto/k8s.io/apimachinery/pkg/runtime/schema/generated.proto"),
+        // Utility types
+        b.path("proto/k8s.io/apimachinery/pkg/util/intstr/generated.proto"),
+        b.path("proto/k8s.io/apimachinery/pkg/api/resource/generated.proto"),
+        // Meta types
+        b.path("proto/k8s.io/apimachinery/pkg/apis/meta/v1/generated.proto"),
+        // API types
+        b.path("proto/k8s.io/api/core/v1/generated.proto"),
+        b.path("proto/k8s.io/api/apps/v1/generated.proto"),
+        b.path("proto/k8s.io/api/batch/v1/generated.proto"),
+    };
+
+    const protoc_step = protobuf.RunProtocStep.create(protobuf_dep.builder, target, .{
+        .destination_directory = b.path("src/proto"),
+        .source_files = proto_files,
+        .include_directories = &.{b.path("proto")},
+    });
+
+    gen_proto_step.dependOn(&protoc_step.step);
 }

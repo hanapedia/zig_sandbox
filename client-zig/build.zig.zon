@@ -36,6 +36,10 @@
             .url = "git+https://github.com/ianic/tls.zig#fe60069029602fb0ca7129f35c1af7c97d6d2473",
             .hash = "tls-0.1.0-ER2e0kOpBQCRFI5ZJTlpYIKYTkYM5eNvBBkBf9MZteut",
         },
+        .protobuf = .{
+            .url = "git+https://github.com/Arwalk/zig-protobuf#1f6cb06156b3ff4f52f98bc14f829c0b8393a6fc",
+            .hash = "protobuf-5.0.0-0e82avKUKAAVwTWJzTIEZ14Fu0zC11_lElR8tE6H__y1",
+        },
     },
     .paths = .{
         "build.zig",

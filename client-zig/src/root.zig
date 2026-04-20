@@ -42,6 +42,7 @@ pub const resources = @import("resources/mod.zig");
 pub const auth = @import("auth/mod.zig");
 pub const client = @import("client/mod.zig");
 pub const api = @import("api/mod.zig");
+pub const proto = @import("proto/mod.zig");
 
 // Convenience re-exports
 pub const Client = client.Client;
