@@ -59,11 +59,13 @@ pub fn main() !void {
     defer client.deinit();
 
     // List pods in default namespace
-    const pods = try k8s.pods(&client, "default").list();
+    const pods = try k8s.pods(&client, "default").list(.{});
     defer pods.deinit();
 
-    for (pods.value.items) |pod| {
-        std.debug.print("Pod: {s}\n", .{pod.metadata.name orelse "unknown"});
+    // Note: protobuf types use .items.items to access the slice
+    for (pods.value.items.items) |pod| {
+        const name = if (pod.metadata) |m| m.name orelse "unknown" else "unknown";
+        std.debug.print("Pod: {s}\n", .{name});
     }
 }
 ```
@@ -95,11 +97,10 @@ client-zig/
 │   ├── client/
 │   │   └── Client.zig     # HTTP/TLS client using tls.zig
 │   ├── api/
-│   │   └── typed.zig      # Generic typed client (TypedClient(T))
-│   ├── resources/
-│   │   ├── meta.zig       # ObjectMeta, ListMeta
-│   │   └── core.zig       # Pod, Service, ConfigMap, etc.
-│   └── proto/             # Generated protobuf types (gitignored)
+│   │   └── typed.zig      # Generic typed client with ResourceInfo
+│   └── proto/
+│       ├── mod.zig        # Module exports for proto types
+│       └── k8s/           # Generated protobuf types (gitignored)
 ├── manifests/             # Kubernetes manifests for in-cluster testing
 ├── Dockerfile
 ├── Taskfile.yml
@@ -166,8 +167,7 @@ const pod = try Pod.jsonDecode(json_response, .{ .ignore_unknown_fields = true }
 ## Limitations
 
 - Read-only operations (get, list) - no create/update/delete yet
-- Core v1 resources only (hand-written types)
-- Apps v1 and Batch v1 available via generated proto types
+- Core v1, Apps v1, and Batch v1 resources via generated proto types
 - No watch/streaming support yet
 
 ## License

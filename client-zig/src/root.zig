@@ -29,8 +29,9 @@
 //!     const pods = try k8s.pods(&client, "default").list(.{});
 //!     defer pods.deinit();
 //!
-//!     for (pods.value.items) |pod| {
-//!         std.debug.print("Pod: {s}\n", .{pod.metadata.name orelse "unknown"});
+//!     for (pods.value.items.items) |pod| {
+//!         const name = if (pod.metadata) |m| m.name orelse "unknown" else "unknown";
+//!         std.debug.print("Pod: {s}\n", .{name});
 //!     }
 //! }
 //! ```
@@ -38,7 +39,6 @@
 const std = @import("std");
 
 // Module exports
-pub const resources = @import("resources/mod.zig");
 pub const auth = @import("auth/mod.zig");
 pub const client = @import("client/mod.zig");
 pub const api = @import("api/mod.zig");
@@ -50,58 +50,127 @@ pub const kubeconfig = auth.kubeconfig;
 pub const in_cluster = auth.in_cluster;
 pub const TypedClient = api.TypedClient;
 pub const ListOptions = api.ListOptions;
+pub const ResourceInfo = api.ResourceInfo;
 
-// Resource types
-pub const Pod = resources.Pod;
-pub const PodList = resources.PodList;
-pub const Service = resources.Service;
-pub const ServiceList = resources.ServiceList;
-pub const ConfigMap = resources.ConfigMap;
-pub const ConfigMapList = resources.ConfigMapList;
-pub const Secret = resources.Secret;
-pub const SecretList = resources.SecretList;
-pub const Namespace = resources.Namespace;
-pub const NamespaceList = resources.NamespaceList;
-pub const Node = resources.Node;
-pub const NodeList = resources.NodeList;
+// Re-export proto types for convenience
+pub const Pod = proto.Pod;
+pub const PodList = proto.PodList;
+pub const PodSpec = proto.PodSpec;
+pub const PodStatus = proto.PodStatus;
+pub const Service = proto.Service;
+pub const ServiceList = proto.ServiceList;
+pub const ConfigMap = proto.ConfigMap;
+pub const ConfigMapList = proto.ConfigMapList;
+pub const Secret = proto.Secret;
+pub const SecretList = proto.SecretList;
+pub const Namespace = proto.Namespace;
+pub const NamespaceList = proto.NamespaceList;
+pub const Node = proto.Node;
+pub const NodeList = proto.NodeList;
+pub const Deployment = proto.Deployment;
+pub const DeploymentList = proto.DeploymentList;
+pub const Job = proto.Job;
+pub const JobList = proto.JobList;
+pub const ObjectMeta = proto.ObjectMeta;
+pub const ListMeta = proto.ListMeta;
+
+// Resource info definitions for core v1 resources
+pub const resource_info = struct {
+    pub const pod: ResourceInfo = .{
+        .api_version = "v1",
+        .api_group = "",
+        .plural = "pods",
+        .namespaced = true,
+    };
+    pub const service: ResourceInfo = .{
+        .api_version = "v1",
+        .api_group = "",
+        .plural = "services",
+        .namespaced = true,
+    };
+    pub const configmap: ResourceInfo = .{
+        .api_version = "v1",
+        .api_group = "",
+        .plural = "configmaps",
+        .namespaced = true,
+    };
+    pub const secret: ResourceInfo = .{
+        .api_version = "v1",
+        .api_group = "",
+        .plural = "secrets",
+        .namespaced = true,
+    };
+    pub const namespace: ResourceInfo = .{
+        .api_version = "v1",
+        .api_group = "",
+        .plural = "namespaces",
+        .namespaced = false,
+    };
+    pub const node: ResourceInfo = .{
+        .api_version = "v1",
+        .api_group = "",
+        .plural = "nodes",
+        .namespaced = false,
+    };
+    pub const deployment: ResourceInfo = .{
+        .api_version = "v1",
+        .api_group = "apps",
+        .plural = "deployments",
+        .namespaced = true,
+    };
+    pub const job: ResourceInfo = .{
+        .api_version = "v1",
+        .api_group = "batch",
+        .plural = "jobs",
+        .namespaced = true,
+    };
+};
 
 // Convenience functions for creating typed clients
 
 /// Create a typed client for Pod resources.
-pub fn pods(c: *Client, namespace: ?[]const u8) TypedClient(Pod) {
-    return .{ .client = c, .namespace = namespace };
+pub fn pods(c: *Client, namespace: ?[]const u8) TypedClient(Pod, PodList) {
+    return .{ .client = c, .namespace = namespace, .info = resource_info.pod };
 }
 
 /// Create a typed client for Service resources.
-pub fn services(c: *Client, namespace: ?[]const u8) TypedClient(Service) {
-    return .{ .client = c, .namespace = namespace };
+pub fn services(c: *Client, namespace: ?[]const u8) TypedClient(Service, ServiceList) {
+    return .{ .client = c, .namespace = namespace, .info = resource_info.service };
 }
 
 /// Create a typed client for ConfigMap resources.
-pub fn configMaps(c: *Client, namespace: ?[]const u8) TypedClient(ConfigMap) {
-    return .{ .client = c, .namespace = namespace };
+pub fn configMaps(c: *Client, namespace: ?[]const u8) TypedClient(ConfigMap, ConfigMapList) {
+    return .{ .client = c, .namespace = namespace, .info = resource_info.configmap };
 }
 
 /// Create a typed client for Secret resources.
-pub fn secrets(c: *Client, namespace: ?[]const u8) TypedClient(Secret) {
-    return .{ .client = c, .namespace = namespace };
+pub fn secrets(c: *Client, namespace: ?[]const u8) TypedClient(Secret, SecretList) {
+    return .{ .client = c, .namespace = namespace, .info = resource_info.secret };
 }
 
 /// Create a typed client for Namespace resources (cluster-scoped).
-pub fn namespaces(c: *Client) TypedClient(Namespace) {
-    return .{ .client = c, .namespace = null };
+pub fn namespaces(c: *Client) TypedClient(Namespace, NamespaceList) {
+    return .{ .client = c, .namespace = null, .info = resource_info.namespace };
 }
 
 /// Create a typed client for Node resources (cluster-scoped).
-pub fn nodes(c: *Client) TypedClient(Node) {
-    return .{ .client = c, .namespace = null };
+pub fn nodes(c: *Client) TypedClient(Node, NodeList) {
+    return .{ .client = c, .namespace = null, .info = resource_info.node };
+}
+
+/// Create a typed client for Deployment resources.
+pub fn deployments(c: *Client, namespace: ?[]const u8) TypedClient(Deployment, DeploymentList) {
+    return .{ .client = c, .namespace = namespace, .info = resource_info.deployment };
+}
+
+/// Create a typed client for Job resources.
+pub fn jobs(c: *Client, namespace: ?[]const u8) TypedClient(Job, JobList) {
+    return .{ .client = c, .namespace = namespace, .info = resource_info.job };
 }
 
 test {
     // Run all module tests
     std.testing.refAllDecls(@This());
-    _ = @import("resources/meta.zig");
-    _ = @import("resources/core.zig");
     _ = @import("api/typed.zig");
     _ = @import("client/Client.zig");
 }

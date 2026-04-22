@@ -2,7 +2,14 @@
 //! Uses comptime generics to provide type-safe get/list operations.
 const std = @import("std");
 const Client = @import("../client/Client.zig").Client;
-const meta = @import("../resources/meta.zig");
+
+/// ResourceInfo describes the API path information for a Kubernetes resource.
+pub const ResourceInfo = struct {
+    api_version: []const u8,
+    api_group: []const u8,
+    plural: []const u8,
+    namespaced: bool,
+};
 
 /// Options for list operations.
 pub const ListOptions = struct {
@@ -13,28 +20,15 @@ pub const ListOptions = struct {
 };
 
 /// TypedClient provides type-safe operations for a specific Kubernetes resource type.
-/// The resource type T must have these comptime declarations:
-/// - resource_api_version: []const u8 (e.g., "v1")
-/// - resource_api_group: []const u8 (e.g., "" for core, "apps" for apps group)
-/// - resource_plural: []const u8 (e.g., "pods")
-/// - resource_namespaced: bool
-pub fn TypedClient(comptime T: type) type {
-    // Compile-time validation
-    if (!@hasDecl(T, "resource_api_version")) {
-        @compileError("Resource type must have 'resource_api_version' declaration");
-    }
-    if (!@hasDecl(T, "resource_plural")) {
-        @compileError("Resource type must have 'resource_plural' declaration");
-    }
-    if (!@hasDecl(T, "resource_namespaced")) {
-        @compileError("Resource type must have 'resource_namespaced' declaration");
-    }
-
+/// T is the resource type (e.g., Pod), L is the list type (e.g., PodList).
+/// Resource metadata is provided via ResourceInfo rather than comptime declarations.
+pub fn TypedClient(comptime T: type, comptime L: type) type {
     return struct {
         const Self = @This();
 
         client: *Client,
         namespace: ?[]const u8,
+        info: ResourceInfo,
 
         /// Get a single resource by name.
         pub fn get(self: Self, name: []const u8) !std.json.Parsed(T) {
@@ -45,48 +39,46 @@ pub fn TypedClient(comptime T: type) type {
         }
 
         /// List all resources matching the criteria.
-        pub fn list(self: Self, options: ListOptions) !std.json.Parsed(meta.List(T)) {
+        pub fn list(self: Self, options: ListOptions) !std.json.Parsed(L) {
             const path = try self.buildListPath(options);
             defer self.client.allocator.free(path);
 
-            return self.client.get(meta.List(T), path);
+            return self.client.get(L, path);
         }
 
         fn buildResourcePath(self: Self, name: []const u8) ![]const u8 {
-            const api_group = if (@hasDecl(T, "resource_api_group")) T.resource_api_group else "";
-
-            if (T.resource_namespaced) {
+            if (self.info.namespaced) {
                 const ns = self.namespace orelse "default";
 
-                if (api_group.len == 0) {
+                if (self.info.api_group.len == 0) {
                     return try std.fmt.allocPrint(self.client.allocator, "/api/{s}/namespaces/{s}/{s}/{s}", .{
-                        T.resource_api_version,
+                        self.info.api_version,
                         ns,
-                        T.resource_plural,
+                        self.info.plural,
                         name,
                     });
                 } else {
                     return try std.fmt.allocPrint(self.client.allocator, "/apis/{s}/{s}/namespaces/{s}/{s}/{s}", .{
-                        api_group,
-                        T.resource_api_version,
+                        self.info.api_group,
+                        self.info.api_version,
                         ns,
-                        T.resource_plural,
+                        self.info.plural,
                         name,
                     });
                 }
             } else {
                 // Cluster-scoped resource
-                if (api_group.len == 0) {
+                if (self.info.api_group.len == 0) {
                     return try std.fmt.allocPrint(self.client.allocator, "/api/{s}/{s}/{s}", .{
-                        T.resource_api_version,
-                        T.resource_plural,
+                        self.info.api_version,
+                        self.info.plural,
                         name,
                     });
                 } else {
                     return try std.fmt.allocPrint(self.client.allocator, "/apis/{s}/{s}/{s}/{s}", .{
-                        api_group,
-                        T.resource_api_version,
-                        T.resource_plural,
+                        self.info.api_group,
+                        self.info.api_version,
+                        self.info.plural,
                         name,
                     });
                 }
@@ -94,55 +86,54 @@ pub fn TypedClient(comptime T: type) type {
         }
 
         fn buildListPath(self: Self, options: ListOptions) ![]const u8 {
-            const api_group = if (@hasDecl(T, "resource_api_group")) T.resource_api_group else "";
             const allocator = self.client.allocator;
 
             // Build base path
             var base_path: []const u8 = undefined;
 
-            if (T.resource_namespaced) {
+            if (self.info.namespaced) {
                 if (self.namespace) |ns| {
-                    if (api_group.len == 0) {
+                    if (self.info.api_group.len == 0) {
                         base_path = try std.fmt.allocPrint(allocator, "/api/{s}/namespaces/{s}/{s}", .{
-                            T.resource_api_version,
+                            self.info.api_version,
                             ns,
-                            T.resource_plural,
+                            self.info.plural,
                         });
                     } else {
                         base_path = try std.fmt.allocPrint(allocator, "/apis/{s}/{s}/namespaces/{s}/{s}", .{
-                            api_group,
-                            T.resource_api_version,
+                            self.info.api_group,
+                            self.info.api_version,
                             ns,
-                            T.resource_plural,
+                            self.info.plural,
                         });
                     }
                 } else {
                     // List across all namespaces
-                    if (api_group.len == 0) {
+                    if (self.info.api_group.len == 0) {
                         base_path = try std.fmt.allocPrint(allocator, "/api/{s}/{s}", .{
-                            T.resource_api_version,
-                            T.resource_plural,
+                            self.info.api_version,
+                            self.info.plural,
                         });
                     } else {
                         base_path = try std.fmt.allocPrint(allocator, "/apis/{s}/{s}/{s}", .{
-                            api_group,
-                            T.resource_api_version,
-                            T.resource_plural,
+                            self.info.api_group,
+                            self.info.api_version,
+                            self.info.plural,
                         });
                     }
                 }
             } else {
                 // Cluster-scoped resource
-                if (api_group.len == 0) {
+                if (self.info.api_group.len == 0) {
                     base_path = try std.fmt.allocPrint(allocator, "/api/{s}/{s}", .{
-                        T.resource_api_version,
-                        T.resource_plural,
+                        self.info.api_version,
+                        self.info.plural,
                     });
                 } else {
                     base_path = try std.fmt.allocPrint(allocator, "/apis/{s}/{s}/{s}", .{
-                        api_group,
-                        T.resource_api_version,
-                        T.resource_plural,
+                        self.info.api_group,
+                        self.info.api_version,
+                        self.info.plural,
                     });
                 }
             }
@@ -212,12 +203,8 @@ pub fn TypedClient(comptime T: type) type {
 }
 
 test "TypedClient path building" {
-    const TestResource = struct {
-        pub const resource_api_version = "v1";
-        pub const resource_api_group = "";
-        pub const resource_plural = "pods";
-        pub const resource_namespaced = true;
-    };
+    const TestResource = struct {};
+    const TestResourceList = struct {};
 
     const io = std.testing.io;
     const allocator = std.testing.allocator;
@@ -228,9 +215,15 @@ test "TypedClient path building" {
     });
     defer client.deinit();
 
-    const typed = TypedClient(TestResource){
+    const typed = TypedClient(TestResource, TestResourceList){
         .client = &client,
         .namespace = "default",
+        .info = .{
+            .api_version = "v1",
+            .api_group = "",
+            .plural = "pods",
+            .namespaced = true,
+        },
     };
 
     // Test resource path
@@ -250,12 +243,8 @@ test "TypedClient path building" {
 }
 
 test "TypedClient cluster-scoped resource" {
-    const ClusterResource = struct {
-        pub const resource_api_version = "v1";
-        pub const resource_api_group = "";
-        pub const resource_plural = "nodes";
-        pub const resource_namespaced = false;
-    };
+    const ClusterResource = struct {};
+    const ClusterResourceList = struct {};
 
     const io = std.testing.io;
     const allocator = std.testing.allocator;
@@ -265,12 +254,46 @@ test "TypedClient cluster-scoped resource" {
     });
     defer client.deinit();
 
-    const typed = TypedClient(ClusterResource){
+    const typed = TypedClient(ClusterResource, ClusterResourceList){
         .client = &client,
         .namespace = null,
+        .info = .{
+            .api_version = "v1",
+            .api_group = "",
+            .plural = "nodes",
+            .namespaced = false,
+        },
     };
 
     const path = try typed.buildResourcePath("node-1");
     defer allocator.free(path);
     try std.testing.expectEqualStrings("/api/v1/nodes/node-1", path);
+}
+
+test "TypedClient apps group resource" {
+    const Deployment = struct {};
+    const DeploymentList = struct {};
+
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+
+    var client = try Client.init(io, allocator, .{
+        .host = "https://localhost:6443",
+    });
+    defer client.deinit();
+
+    const typed = TypedClient(Deployment, DeploymentList){
+        .client = &client,
+        .namespace = "default",
+        .info = .{
+            .api_version = "v1",
+            .api_group = "apps",
+            .plural = "deployments",
+            .namespaced = true,
+        },
+    };
+
+    const path = try typed.buildResourcePath("nginx");
+    defer allocator.free(path);
+    try std.testing.expectEqualStrings("/apis/apps/v1/namespaces/default/deployments/nginx", path);
 }

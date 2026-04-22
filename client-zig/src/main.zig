@@ -101,13 +101,13 @@ fn listNamespaces(client: *k8s.Client) !void {
     const result = try k8s.namespaces(client).list(.{});
     defer result.deinit();
 
-    if (result.value.items.len == 0) {
+    if (result.value.items.items.len == 0) {
         std.debug.print("  (no namespaces found)\n", .{});
         return;
     }
 
-    for (result.value.items) |ns| {
-        const name = ns.metadata.name orelse "unknown";
+    for (result.value.items.items) |ns| {
+        const name = if (ns.metadata) |m| m.name orelse "unknown" else "unknown";
         const phase = if (ns.status) |s| s.phase orelse "Unknown" else "Unknown";
         std.debug.print("  {s} ({s})\n", .{ name, phase });
     }
@@ -117,13 +117,13 @@ fn listPods(client: *k8s.Client, namespace: []const u8) !void {
     const result = try k8s.pods(client, namespace).list(.{});
     defer result.deinit();
 
-    if (result.value.items.len == 0) {
+    if (result.value.items.items.len == 0) {
         std.debug.print("  (no pods found)\n", .{});
         return;
     }
 
-    for (result.value.items) |pod| {
-        const name = pod.metadata.name orelse "unknown";
+    for (result.value.items.items) |pod| {
+        const name = if (pod.metadata) |m| m.name orelse "unknown" else "unknown";
         const phase = if (pod.status) |s| s.phase orelse "Unknown" else "Unknown";
         const pod_ip = if (pod.status) |s| s.podIP orelse "N/A" else "N/A";
         std.debug.print("  {s} ({s}) - IP: {s}\n", .{ name, phase, pod_ip });
@@ -134,13 +134,13 @@ fn listServices(client: *k8s.Client, namespace: []const u8) !void {
     const result = try k8s.services(client, namespace).list(.{});
     defer result.deinit();
 
-    if (result.value.items.len == 0) {
+    if (result.value.items.items.len == 0) {
         std.debug.print("  (no services found)\n", .{});
         return;
     }
 
-    for (result.value.items) |svc| {
-        const name = svc.metadata.name orelse "unknown";
+    for (result.value.items.items) |svc| {
+        const name = if (svc.metadata) |m| m.name orelse "unknown" else "unknown";
         const svc_type = if (svc.spec) |s| s.type orelse "ClusterIP" else "ClusterIP";
         const cluster_ip = if (svc.spec) |s| s.clusterIP orelse "None" else "None";
         std.debug.print("  {s} ({s}) - ClusterIP: {s}\n", .{ name, svc_type, cluster_ip });

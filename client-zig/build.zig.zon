@@ -33,7 +33,7 @@
     // internet connectivity.
     .dependencies = .{
         .tls = .{
-            .url = "git+https://github.com/ianic/tls.zig#fe60069029602fb0ca7129f35c1af7c97d6d2473",
+            .url = "git+https://github.com/ianic/tls.zig#561cd3e5a88ec430d2021e2da19b6bee667e020d",
             .hash = "tls-0.1.0-ER2e0kOpBQCRFI5ZJTlpYIKYTkYM5eNvBBkBf9MZteut",
         },
         .protobuf = .{
