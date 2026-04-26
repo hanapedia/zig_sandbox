@@ -8,6 +8,13 @@ const ResourceInfo = @import("typed.zig").ResourceInfo;
 const proto = @import("../proto/mod.zig");
 
 // ============================================================================
+// Constants
+// ============================================================================
+
+const WatchQueryPart = "watch=true";
+const AllowWatchBookmarksQueryPart = "allowWatchBookmarks=true";
+
+// ============================================================================
 // Public Types
 // ============================================================================
 
@@ -126,6 +133,209 @@ pub const WatchStream = struct {
     ) !Self {
         // 1. Build the watch URL path
         const path = try buildWatchPath(client.allocator, namespace, info, options);
+        defer client.allocator.free(path);
+
+        // 2. Establish TCP connection
+        const hostname = std.Io.net.HostName.init(client.host) catch
+            return error.ConnectionFailed;
+
+        const tcp_stream = hostname.connect(client.io, client.port, .{ .mode = .stream }) catch
+            return error.ConnectionFailed;
+        errdefer tcp_stream.close(client.io);
+
+        // 3. Upgrade to TLS
+        const rng_impl: std.Random.IoSource = .{ .io = client.io };
+        const rng = rng_impl.interface();
+        const now = std.Io.Clock.real.now(client.io);
+
+        var tls_conn = tls.clientFromStream(client.io, tcp_stream, .{
+            .rng = rng,
+            .now = now,
+            .host = client.host,
+            .root_ca = client.ca_bundle,
+        }) catch return error.TlsError;
+        errdefer tls_conn.close() catch {};
+
+        // 4. Send HTTP GET request
+        try sendWatchRequest(&tls_conn, client, path);
+
+        return Self{
+            .allocator = client.allocator,
+            .io = client.io,
+            .tls_conn = tls_conn,
+            .tcp_stream = tcp_stream,
+            .headers_parsed = false,
+            .is_chunked = false,
+            .chunk_remaining = 0,
+            .line_buffer = .empty,
+            .read_buffer = undefined,
+            .read_buffer_pos = 0,
+            .read_buffer_len = 0,
+            .closed = false,
+        };
+    }
+
+    /// Clean up resources and close connection.
+    pub fn deinit(self: *Self) void {
+        self.line_buffer.deinit(self.allocator);
+        self.tls_conn.close();
+        self.tcp_stream.close(self.io);
+        self.closed = true;
+    }
+
+    /// Check if the stream has been closed.
+    pub fn isClosed(self: *Self) bool {
+        return self.closed;
+    }
+
+    /// close the watch stream.
+    pub fn close(self: *Self) void {
+        if (!self.closed) {
+            self.tls_conn.close() catch {};
+            self.tcp_stream.close(self.io);
+            self.closed = true;
+        }
+    }
+
+    /// Read Raw bytes from the TLS connection.
+    /// This bypasses chunked encoding - use readLine() for normal usage.
+    pub fn read(self: *Self, buffer: []u8) !usize {
+        // return if the connection is already closed
+        if (self.closed) return 0;
+
+        const n = self.tls_conn.read(buffer) catch |err| {
+            if (err == error.EndOfStream) {
+                self.closed = true;
+                return 0;
+            }
+            return err;
+        };
+
+        if (n == 0) self.closed = true;
+        return n;
+    }
+
+    /// Read the next complete JSON line from the stream.
+    /// Headless HTTP chunked encoding and partial line buffering.
+    /// Returns null when stream ends.
+    /// Caller owns returned slice and must deallocate with self.allocator.
+    pub fn readLine(self: *Self) !?[]u8 {
+        if (self.closed) return null;
+
+        // Parse HTTP headers on first call
+        if (!self.header_parsed) {
+            try self.parseHTTPHeaders();
+        }
+
+        // Read until we have a complete line
+        while (true) {
+            // Check if we have a complete line in buffer
+            if (try self.findLineInBuffer()) |line| {
+                return line;
+            }
+
+            // We need more data - read from connection
+            const bytes_read = try self.readMoreData();
+            if (bytes_read == 0) {
+                // bytes_read = 0 -> EOF
+                // Connection closed
+                self.closed = true;
+
+                // Return any remaining buffered data as final line
+                if (self.line_buffer.items.len > 0) {
+                    const final_line = try self.allocator.dupe(u8, self.line_buffer.items);
+                    self.line_buffer.clearRetainingCapacity();
+                    return final_line;
+                }
+                return null;
+            }
+        }
+    }
+
+    // ========================================================================
+    // Private Methods
+    // ========================================================================
+
+    /// Parse HTTP response headers, extract status and chunked flag.
+    fn parseHTTPHeaders(self: *Self) !void {
+        // Read until we find "\r\n\r\n" (end of headers)
+        while (true) {
+            // Try to find headers end in current buffer
+            const headers_end = std.mem.indexOf(u8, self.line_buffer.items, "\r\n\r\n");
+            if (headers_end) |end_idx| {
+                const headers = self.line_buffer.items[0..end_idx];
+
+                // Parse status line: "HTTP/1.1 200 OK"
+                const status_line_end = std.mem.indexOf(u8, headers, "\r\n") orelse
+                    return error.InvalidResponse;
+                const status_line = headers[0..status_line_end];
+
+                var parts = std.mem.tokenizeScalar(u8, status_line, ' ');
+                _ = parts.next() orelse return error.InvalidResponse;
+                const status_str = parts.next() orelse return error.InvalidResponse;
+                const status_code = std.fmt.parseInt(u16, status_str, 10) catch
+                    return error.InvalidResponse;
+
+                if (status_code != 200) {
+                    std.debug.print("Watch request failed with status: {d}\n", .{status_code});
+                    return error.WatchFailed;
+                }
+
+                // Check for chunked encoding (case-insensitive search)
+                // Look for "Transfer-Encoding" header containing "chunked"
+                self.is_chunked = std.mem.indexOf(u8, headers, "chunked") != null;
+
+                // Remove headers from buffer, keep body data
+                const body_start = end_idx + 4;
+                const remaining = self.line_buffer.items[body_start..];
+                @memmove(self.line_buffer.items[0..remaining.len], remaining);
+                self.line_buffer.items.len = remaining.len;
+
+                self.header_parsed = true;
+                return;
+            }
+
+            // Need more data - read from TLS
+            const n = self.tls_conn.read(&self.read_buffer) catch |err| {
+                if (err == error.EndOfStream) return error.UnexpectedEndOfStream;
+                return err;
+            };
+            if (n == 0) return error.UnexpectedEndOfStream;
+
+            try self.line_buffer.appendSlice(self.allocator, self.read_buffer[0..n]);
+        }
+    }
+
+    /// Find a complete line in the buffer, extract and return it.
+    fn findLineInBuffer(self: *Self) !?[]const u8 {
+        const newline_idx = std.mem.indexOfScalar(u8, self.line_buffer.items, '\n') orelse
+            return null;
+
+        // Extract line (trim trailing \r if present)
+        var line_end = newline_idx;
+        if (line_end > 0 and self.line_buffer.items[line_end - 1] == '\r') {
+            line_end -= 1;
+        }
+
+        const line = try self.allocator.dupe(u8, self.line_buffer.items[0..line_end]);
+
+        // Remove line from buffer (including \n)
+        const remaining_start = newline_idx + 1;
+        const remaining = self.line_buffer.items[remaining_start..];
+        @memmove(self.line_buffer.items[0..remaining.len], remaining);
+        self.line_buffer.items.len = remaining.len;
+
+        return line;
+    }
+
+    /// Read more data from connection into line buffer.
+    /// Headless chunked encoding if enabled.
+    fn readMoreData(self: *Self) !usize {
+        if (self.is_chunked) {
+            return self.readChunkedData(); // undefined
+        } else {
+            return self.readRawData(); // undefined
+        }
     }
 };
 
@@ -228,5 +438,32 @@ fn isStaticString(s: []const u8) bool {
         std.mem.eql(u8, s, AllowWatchBookmarksQueryPart);
 }
 
-const WatchQueryPart = "watch=true";
-const AllowWatchBookmarksQueryPart = "allowWatchBookmarks=true";
+/// Send the HTTP GET request for watching
+fn sendWatchRequest(
+    tls_conn: *tls.Connection,
+    client: *Client,
+    path: []const u8,
+) !void {
+    // Build Authorization header
+    const auth_header = if (client.token) |token|
+        try std.fmt.allocPrint(client.allocator, "Authorization: Bearer {s}\r\n", .{token})
+    else
+        try client.allocator.dupe(u8, "");
+    defer client.allocator.free(auth_header);
+
+    // Build full HTTP request
+    const request = try std.fmt.allocPrint(
+        client.allocator,
+        "GET {s} HTTP/1.1\r\n" ++
+            "Host: {s}\r\n" ++
+            "{s}" ++
+            "Accept: application/json\r\n" ++
+            "Connection: keep-alive\r\n" ++
+            "\r\n",
+        .{ path, client.host, auth_header },
+    );
+    defer client.allocator.free(request);
+
+    // Send request
+    _ = tls_conn.write(request) catch return Client.Error.RequestFailed;
+}
