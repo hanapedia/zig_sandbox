@@ -42,6 +42,7 @@ const std = @import("std");
 pub const auth = @import("auth/mod.zig");
 pub const client = @import("client/mod.zig");
 pub const api = @import("api/mod.zig");
+pub const watch = @import("api/watch.zig");
 pub const proto = @import("proto/mod.zig");
 
 // Convenience re-exports
