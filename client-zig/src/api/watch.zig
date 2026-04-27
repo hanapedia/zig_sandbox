@@ -61,16 +61,23 @@ pub fn WatchEvent(comptime T: type) type {
     return struct {
         const Self = @This();
 
-        /// Event Type
+        const RawEvent = struct {
+            type: []const u8,
+            object: T,
+        };
+
         event_type: EventType,
+        _parsed: std.json.Parsed(RawEvent),
 
         /// Parsed resource object.
         /// For BOOKMARK events, only metadata.resourceVersion is populated.
-        object: std.json.Parsed(T),
+        pub fn object(self: Self) T {
+            return self._parsed.value.object;
+        }
 
         /// Free the parsed object memory.
         pub fn deinit(self: *Self) void {
-            self.object.deinit();
+            self._parsed.deinit();
         }
     };
 }
@@ -332,12 +339,206 @@ pub const WatchStream = struct {
     /// Headless chunked encoding if enabled.
     fn readMoreData(self: *Self) !usize {
         if (self.is_chunked) {
-            return self.readChunkedData(); // undefined
+            return self.readChunkedData();
         } else {
-            return self.readRawData(); // undefined
+            return self.readRawData();
+        }
+    }
+
+    /// Read raw (non-chunked) data.
+    fn readRawData(self: *Self) !usize {
+        const n = self.tls_conn.read(&self.read_buffer) catch |err| {
+            if (err == error.EndOfStream) return 0;
+            return err;
+        };
+        if (n == 0) return 0;
+
+        try self.line_buffer.appendSlice(self.allocator, self.read_buffer[0..n]);
+        return n;
+    }
+
+    /// Read chunked-encoded data.
+    ///
+    /// Format:
+    /// ```
+    /// <size-in-hex>\r\n
+    /// <data>\r\n
+    /// <size-in-hex>\r\n
+    /// <data>\r\n
+    /// 0\r\n
+    /// \r\n
+    /// ```
+    fn readChunkedData(self: *Self) !usize {
+        // If no bytes remaining in current chunk, read next chunk size
+        if (self.chunk_remaining == 0) {
+            try self.readChunkSize();
+
+            // Zero-size chunk means end of stream
+            if (self.chunk_remaining == 0) {
+                return 0;
+            }
+        }
+
+        // Read from current chunk (don't read more than chunk_remaining)
+        const to_read = @min(self.chunk_remaining, self.read_buffer.len);
+        const n = self.tls_conn.read(self.read_buffer[0..to_read]) catch |err| {
+            if (err == error.EndOfStream) return 0;
+            return err;
+        };
+        if (n == 0) return 0;
+
+        try self.line_buffer.appendSlice(self.allocator, self.read_buffer[0..n]);
+        self.chunk_remaining -= n;
+
+        // If chunk finished, consume trailing CRLF
+        if (self.chunk_remaining == 0) {
+            try self.consumeCRLF();
+        }
+
+        return n;
+    }
+
+    /// Read and parse chunk size line (e.g., "4a\r\n" -> 74).
+    fn readChunkSize(self: *Self) !void {
+        // Accumulate bytes until we find CRLF
+        var size_buf: [32]u8 = undefined;
+        var size_len: usize = 0;
+
+        while (size_len < size_buf.len) {
+            var byte: [1]u8 = undefined;
+            const n = self.tls_conn.read(&byte) catch |err| {
+                if (err == error.EndOfStream) return error.UnexpectedEndOfStream;
+                return err;
+            };
+            if (n == 0) return error.UnexpectedEndOfStream;
+
+            if (byte[0] == '\r') {
+                // Next byte should be \n
+                const n2 = self.tls_conn.read(&byte) catch |err| {
+                    if (err == error.EndOfStream) return error.UnexpectedEndOfStream;
+                    return err;
+                };
+                if (n2 == 0 or byte[0] != '\n') {
+                    return error.InvalidChunkedEncoding;
+                }
+                break;
+            }
+
+            size_buf[size_len] = byte[0];
+            size_len += 1;
+        }
+
+        // parse hex chunk size
+        self.chunk_remaining = std.fmt.parseInt(usize, size_buf[0..size_len], 16) catch
+            return error.InvalidChunkedEncoding;
+    }
+
+    /// Consume the trailing CRCL after chunk data.
+    fn consumeCRLF(self: *Self) !void {
+        var crlf: [2]u8 = undefined;
+        var read_total: usize = 0;
+
+        while (read_total < 2) {
+            const n = self.tls_conn.read(crlf[read_total..]) catch |err| {
+                if (err == error.EndOfStream) return error.InvalidChunkedEncoding;
+                return err;
+            };
+            if (n == 0) return error.InvalidChunkedEncoding;
+            read_total += n;
+        }
+
+        if (crlf[0] != '\r' or crlf[1] != '\n') {
+            return error.InvalidChunkedEncoding;
         }
     }
 };
+
+// ============================================================================
+// Watcher(T) - High-level API
+// ============================================================================
+
+/// High-level typed watcher that yields WatchEvent(T) objects.
+///
+/// ## Example: High-level usage
+/// var watcher = try Watcher(Pod).init(client, "default", info, .{});
+/// defer watcher.deinit();
+///
+/// while (try watcher.next()) |*event| {
+///     defer event.deinit();
+///     std.debug.print("[{s}] {s}\n", .{
+///         @tagName(event.event_type),
+///         event.object.value.metadata.?.name orelse "?",
+///     });
+/// }
+pub fn Watcher(comptime T: type) type {
+    return struct {
+        const Self = @This();
+
+        stream: WatchStream,
+        allocator: std.mem.Allocator,
+
+        /// Initialize a watcher for the given resource type.
+        pub fn init(
+            client: *Client,
+            namespace: ?[]const u8,
+            info: ResourceInfo,
+            options: WatchOptions,
+        ) !Self {
+            return Self{
+                .stream = try WatchStream.init(client, namespace, info, options),
+                .allocator = client.allocator,
+            };
+        }
+
+        /// Get the next watch event.
+        /// Returns null when the stream ends.
+        /// Caller must call event.deinit() when done.
+        pub fn next(self: *Self) !?WatchEvent(T) {
+            // Read the next JSON line.
+            const line = try self.stream.readLine() orelse return null;
+            defer self.allocator.free(line);
+
+            // Parse directly into a struct with the typed object field
+            const parsed = std.json.parseFromSlice(
+                WatchEvent(T).RawEvent,
+                self.allocator,
+                line,
+                .{ .ignore_unknown_fields = true, .allocate = .alloc_always },
+            ) catch return error.JsonParseError;
+
+            // Convert type string to enum
+            const event_type = EventType.fromString(parsed.value.type) orelse {
+                parsed.deinit();
+                return error.UnknownEventType;
+            };
+
+            return WatchEvent(T){
+                .event_type = event_type,
+                ._parsed = parsed,
+            };
+        }
+
+        /// Get access to the underlying WatchStream for low-level control.
+        pub fn getStream(self: *Self) *WatchStream {
+            return &self.stream;
+        }
+
+        /// Check if the watche is closed.
+        pub fn isClosed(self: *Self) bool {
+            return &self.stream.isClosed();
+        }
+
+        /// Close the watcher.
+        pub fn close(self: *Self) void {
+            return &self.stream.close();
+        }
+
+        /// Clean up resources.
+        pub fn deinit(self: *Self) void {
+            self.stream.deinit();
+        }
+    };
+}
 
 fn buildWatchPath(
     allocator: std.mem.Allocator,
@@ -466,4 +667,67 @@ fn sendWatchRequest(
 
     // Send request
     _ = tls_conn.write(request) catch return Client.Error.RequestFailed;
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+test "buildWatchPath basic" {
+    const allocator = std.testing.allocator;
+
+    const path = try buildWatchPath(allocator, "default", .{
+        .api_version = "v1",
+        .api_group = "",
+        .plural = "pods",
+        .namespaced = true,
+    }, .{});
+    defer allocator.free(path);
+
+    try std.testing.expect(std.mem.indexOf(u8, path, "/api/v1/namespaces/default/pods") != null);
+    try std.testing.expect(std.mem.indexOf(u8, path, "watch=true") != null);
+}
+
+test "buildWatchPath with options" {
+    const allocator = std.testing.allocator;
+
+    const path = try buildWatchPath(allocator, "kube-system", .{
+        .api_version = "v1",
+        .api_group = "apps",
+        .plural = "deployments",
+        .namespaced = true,
+    }, .{
+        .resourceVersion = "12345",
+        .labelSelector = "app=nginx",
+        .timeoutSeconds = 300,
+    });
+    defer allocator.free(path);
+
+    try std.testing.expect(std.mem.indexOf(u8, path, "resourceVersion=12345") != null);
+    try std.testing.expect(std.mem.indexOf(u8, path, "labelSelector=app=nginx") != null);
+    try std.testing.expect(std.mem.indexOf(u8, path, "timeoutSeconds=300") != null);
+}
+
+test "buildWatchPath cluster-scoped" {
+    const allocator = std.testing.allocator;
+
+    const path = try buildWatchPath(allocator, null, .{
+        .api_version = "v1",
+        .api_group = "",
+        .plural = "nodes",
+        .namespaced = false,
+    }, .{});
+    defer allocator.free(path);
+
+    try std.testing.expect(std.mem.indexOf(u8, path, "/api/v1/nodes") != null);
+    try std.testing.expect(std.mem.indexOf(u8, path, "namespaces") == null);
+}
+
+test "EventType parsing" {
+    try std.testing.expectEqual(EventType.ADDED, try EventType.fromString("ADDED"));
+    try std.testing.expectEqual(EventType.MODIFIED, try EventType.fromString("MODIFIED"));
+    try std.testing.expectEqual(EventType.DELETED, try EventType.fromString("DELETED"));
+    try std.testing.expectEqual(EventType.BOOKMARK, try EventType.fromString("BOOKMARK"));
+    try std.testing.expectEqual(EventType.ERROR, try EventType.fromString("ERROR"));
+    try std.testing.expectError(error.InvalidEventType, EventType.fromString("INVALID"));
 }

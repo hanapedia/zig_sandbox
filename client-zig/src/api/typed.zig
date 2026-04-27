@@ -1,6 +1,7 @@
 //! Generic typed client for Kubernetes resources.
 //! Uses comptime generics to provide type-safe get/list operations.
 const std = @import("std");
+const watcher = @import("watch.zig");
 const Client = @import("../client/Client.zig").Client;
 
 /// ResourceInfo describes the API path information for a Kubernetes resource.
@@ -44,6 +45,22 @@ pub fn TypedClient(comptime T: type, comptime L: type) type {
             defer self.client.allocator.free(path);
 
             return self.client.get(L, path);
+        }
+
+        /// Start watching resources.
+        /// Returns a Watcher that yields typed WatchEvent(T) objects.
+        ///
+        /// Example:
+        /// 
+        /// var watcher = try k8s.pods(&client, "default").watch(.{});
+        /// defer watcher.deinit();
+        ///
+        /// while (try watcher.next()) |*event| {
+        ///     defer event.deinit();
+        ///     // handle event
+        /// }
+        pub fn watch(self: Self, options: watcher.WatchOptions) !watcher.Watcher(T) {
+            return watcher.Watcher(T).init(self.client, self.namespace, self.info, options);
         }
 
         fn buildResourcePath(self: Self, name: []const u8) ![]const u8 {

@@ -53,6 +53,13 @@ pub const TypedClient = api.TypedClient;
 pub const ListOptions = api.ListOptions;
 pub const ResourceInfo = api.ResourceInfo;
 
+// Watch API
+pub const Watcher = api.Watcher;
+pub const WatchStream = api.WatchStream;
+pub const WatchOptions = api.WatchOptions;
+pub const WatchEvent = api.WatchEvent;
+pub const EventType = api.EventType;
+
 // Re-export proto types for convenience
 pub const Pod = proto.Pod;
 pub const PodList = proto.PodList;
