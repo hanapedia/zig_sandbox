@@ -112,6 +112,13 @@ tasks:
       # Fix tab characters in generated comments
       - find src/proto -name "*.pb.zig" -exec sed -i 's/\t/    /g' {} \;
       - zig fmt src/proto/
+      # Apply JSON compatibility patches
+      - task: proto:patch
+
+  proto:patch:
+    desc: Patch generated types for Kubernetes JSON compatibility
+    cmds:
+      - ./scripts/patch_proto_types.sh
 
   proto:all:
     desc: Download protos, create symlinks, and generate Zig code

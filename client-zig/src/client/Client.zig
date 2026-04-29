@@ -2,6 +2,24 @@
 //! Uses tls.zig for TLS connections to work around std.http.Client TLS issues.
 const std = @import("std");
 const tls = @import("tls");
+const protobuf = @import("protobuf");
+const runtime = @import("../proto/k8s/io/apimachinery/pkg/runtime.pb.zig");
+
+/// Kubernetes protobuf magic bytes
+const K8S_PROTOBUF_MAGIC = "k8s\x00";
+
+/// Content types
+pub const ContentType = enum {
+    json,
+    protobuf,
+
+    pub fn acceptHeader(self: ContentType) []const u8 {
+        return switch (self) {
+            .json => "application/json",
+            .protobuf => "application/vnd.kubernetes.protobuf",
+        };
+    }
+};
 
 pub const Client = struct {
     allocator: std.mem.Allocator,
@@ -22,6 +40,7 @@ pub const Client = struct {
         Conflict,
         ServerError,
         JsonParseError,
+        ProtobufDecodeError,
         CertificateError,
         InvalidUri,
         TlsError,
@@ -81,9 +100,91 @@ pub const Client = struct {
         if (self.token) |t| self.allocator.free(t);
     }
 
+    /// Perform a GET request and parse the response as protobuf into type T.
+    pub fn get(self: *Client, comptime T: type, path: []const u8) !ProtoResult(T) {
+        const response = try self.requestWithContentType(.GET, path, null, .protobuf);
+        errdefer self.allocator.free(response.body);
+
+        // Check status code
+        switch (response.status) {
+            .ok => {},
+            .unauthorized => return error.Unauthorized,
+            .forbidden => return error.Forbidden,
+            .not_found => return error.NotFound,
+            .conflict => return error.Conflict,
+            else => {
+                if (@intFromEnum(response.status) >= 500) {
+                    return error.ServerError;
+                }
+                return error.InvalidResponse;
+            },
+        }
+
+        // Parse protobuf response
+        return self.decodeK8sProtobuf(T, response.body);
+    }
+
+    /// Result type for protobuf decoding - owns the response body memory
+    pub fn ProtoResult(comptime T: type) type {
+        return struct {
+            value: T,
+            _response_body: []const u8,
+            _allocator: std.mem.Allocator,
+
+            pub fn deinit(self: *@This()) void {
+                protobuf.deinit(self._allocator, &self.value);
+                self._allocator.free(self._response_body);
+            }
+        };
+    }
+
+    /// Decode Kubernetes protobuf envelope format.
+    /// Format: k8s\x00 + protobuf(Unknown{typeMeta, raw})
+    /// The raw field contains the actual protobuf-encoded message.
+    fn decodeK8sProtobuf(self: *Client, comptime T: type, body: []const u8) !ProtoResult(T) {
+        // Check magic bytes
+        if (body.len < 4 or !std.mem.eql(u8, body[0..4], K8S_PROTOBUF_MAGIC)) {
+            std.debug.print("Invalid K8s protobuf magic, got: {x}\n", .{body[0..@min(4, body.len)]});
+            return error.InvalidResponse;
+        }
+
+        // Skip magic bytes and decode Unknown wrapper
+        var reader: std.Io.Reader = .fixed(body[4..]);
+
+        const unknown = runtime.Unknown.decode(&reader, self.allocator) catch |err| {
+            std.debug.print("Failed to decode Unknown wrapper: {}\n", .{err});
+            return error.ProtobufDecodeError;
+        };
+        defer {
+            var u = unknown;
+            u.deinit(self.allocator);
+        }
+
+        // The raw field contains the actual message
+        const raw_data = unknown.raw orelse {
+            std.debug.print("Unknown wrapper has no raw data\n", .{});
+            return error.InvalidResponse;
+        };
+
+        // Decode the actual type from raw bytes
+        var raw_reader: std.Io.Reader = .fixed(raw_data);
+
+        const value = T.decode(&raw_reader, self.allocator) catch |err| {
+            std.debug.print("Failed to decode {s}: {}\n", .{ @typeName(T), err });
+            return error.ProtobufDecodeError;
+        };
+
+        return .{
+            .value = value,
+            ._response_body = body,
+            ._allocator = self.allocator,
+        };
+    }
+
     /// Perform a GET request and parse the response as JSON into type T.
-    pub fn get(self: *Client, comptime T: type, path: []const u8) !std.json.Parsed(T) {
-        const response = try self.request(.GET, path, null);
+    /// Deprecated: Use get() for protobuf encoding instead.
+    pub fn getJson(self: *Client, comptime T: type, path: []const u8) !std.json.Parsed(T) {
+        const response = try self.requestWithContentType(.GET, path, null, .json);
         defer self.allocator.free(response.body);
 
         // Check status code
@@ -102,18 +203,35 @@ pub const Client = struct {
         }
 
         // Parse JSON response
-        return std.json.parseFromSlice(T, self.allocator, response.body, .{
+        @setEvalBranchQuota(1000000);
+
+        return T.jsonDecode(response.body, .{
             .ignore_unknown_fields = true,
-            .allocate = .alloc_always,
-        }) catch return error.JsonParseError;
+            .allocate = .alloc_if_needed,
+        }, self.allocator) catch |err| {
+            std.debug.print("Proto JSON parse error: {}\n", .{err});
+            std.debug.print("Response body (first 500 chars): {s}\n", .{response.body[0..@min(500, response.body.len)]});
+            return error.JsonParseError;
+        };
     }
 
-    /// Perform a raw HTTP request using tls.zig.
+    /// Perform a raw HTTP request using tls.zig with JSON content type.
     pub fn request(
         self: *Client,
         method: std.http.Method,
         path: []const u8,
         body: ?[]const u8,
+    ) !Response {
+        return self.requestWithContentType(method, path, body, .json);
+    }
+
+    /// Perform a raw HTTP request using tls.zig with specified content type.
+    pub fn requestWithContentType(
+        self: *Client,
+        method: std.http.Method,
+        path: []const u8,
+        body: ?[]const u8,
+        content_type: ContentType,
     ) !Response {
         // Create HostName for connection
         const hostname = std.Io.net.HostName.init(self.host) catch |err| {
@@ -162,12 +280,14 @@ pub const Client = struct {
         defer self.allocator.free(content_length_header);
 
         const body_content = body orelse "";
+        const accept_header = content_type.acceptHeader();
 
-        const request_str = try std.fmt.allocPrint(self.allocator, "{s} {s} HTTP/1.1\r\nHost: {s}\r\n{s}Accept: application/json\r\nContent-Type: application/json\r\n{s}Connection: close\r\n\r\n{s}", .{
+        const request_str = try std.fmt.allocPrint(self.allocator, "{s} {s} HTTP/1.1\r\nHost: {s}\r\n{s}Accept: {s}\r\nContent-Type: application/json\r\n{s}Connection: close\r\n\r\n{s}", .{
             @tagName(method),
             path_to_use,
             self.host,
             auth_header,
+            accept_header,
             content_length_header,
             body_content,
         });

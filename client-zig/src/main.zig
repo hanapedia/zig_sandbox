@@ -33,23 +33,30 @@ pub fn main(init: std.process.Init) !void {
     };
     defer client.deinit();
 
-    // List namespaces
-    std.debug.print("\n--- Namespaces ---\n", .{});
+    const namespace = config.namespace orelse "default";
+
+    // List namespaces using protobuf encoding
+    std.debug.print("\n--- Namespaces (protobuf encoding) ---\n", .{});
     listNamespaces(&client) catch |err| {
         std.debug.print("Failed to list namespaces: {}\n", .{err});
     };
 
-    // List pods in default namespace
-    const namespace = config.namespace orelse "default";
-    std.debug.print("\n--- Pods in '{s}' namespace ---\n", .{namespace});
+    // List pods using protobuf encoding
+    std.debug.print("\n--- Pods in '{s}' namespace (protobuf encoding) ---\n", .{namespace});
     listPods(&client, namespace) catch |err| {
         std.debug.print("Failed to list pods: {}\n", .{err});
     };
 
-    // List services
-    std.debug.print("\n--- Services in '{s}' namespace ---\n", .{namespace});
+    // List services using protobuf encoding
+    std.debug.print("\n--- Services in '{s}' namespace (protobuf encoding) ---\n", .{namespace});
     listServices(&client, namespace) catch |err| {
         std.debug.print("Failed to list services: {}\n", .{err});
+    };
+
+    // Watch pods using protobuf encoding
+    std.debug.print("\n--- Watching Pods in '{s}' namespace (protobuf encoding) ---\n", .{namespace});
+    watchPods(&client, namespace) catch |err| {
+        std.debug.print("Failed to watch pods: {}\n", .{err});
     };
 }
 
@@ -98,7 +105,7 @@ const Config = struct {
 };
 
 fn listNamespaces(client: *k8s.Client) !void {
-    const result = try k8s.namespaces(client).list(.{});
+    var result = try k8s.namespaces(client).list(.{});
     defer result.deinit();
 
     if (result.value.items.items.len == 0) {
@@ -114,7 +121,7 @@ fn listNamespaces(client: *k8s.Client) !void {
 }
 
 fn listPods(client: *k8s.Client, namespace: []const u8) !void {
-    const result = try k8s.pods(client, namespace).list(.{});
+    var result = try k8s.pods(client, namespace).list(.{});
     defer result.deinit();
 
     if (result.value.items.items.len == 0) {
@@ -131,7 +138,7 @@ fn listPods(client: *k8s.Client, namespace: []const u8) !void {
 }
 
 fn listServices(client: *k8s.Client, namespace: []const u8) !void {
-    const result = try k8s.services(client, namespace).list(.{});
+    var result = try k8s.services(client, namespace).list(.{});
     defer result.deinit();
 
     if (result.value.items.items.len == 0) {
@@ -144,5 +151,87 @@ fn listServices(client: *k8s.Client, namespace: []const u8) !void {
         const svc_type = if (svc.spec) |s| s.type orelse "ClusterIP" else "ClusterIP";
         const cluster_ip = if (svc.spec) |s| s.clusterIP orelse "None" else "None";
         std.debug.print("  {s} ({s}) - ClusterIP: {s}\n", .{ name, svc_type, cluster_ip });
+    }
+}
+
+/// Watch pods using the high-level Watcher API.
+/// This demonstrates the iterator-style usage pattern.
+fn watchPods(client: *k8s.Client, namespace: []const u8) !void {
+    // Create a typed watcher for Pods
+    var watcher = try k8s.Watcher(k8s.Pod).init(
+        client,
+        namespace,
+        k8s.resource_info.pod,
+        .{}, // Default watch options
+    );
+    defer watcher.deinit();
+
+    std.debug.print("  Watching for pod events...\n", .{});
+
+    // Iterate over watch events
+    var event_count: usize = 0;
+    while (try watcher.next()) |event_val| {
+        var event = event_val;
+        defer event.deinit();
+
+        const pod = event.object();
+        const name = if (pod.metadata) |m| m.name orelse "unknown" else "unknown";
+        const phase = if (pod.status) |s| s.phase orelse "Unknown" else "Unknown";
+
+        std.debug.print("  [{s}] {s} - {s}\n", .{
+            @tagName(event.event_type),
+            name,
+            phase,
+        });
+
+        event_count += 1;
+
+        // For demo purposes, stop after 3 events
+        if (event_count >= 3) {
+            std.debug.print("  (stopping after 3 events)\n", .{});
+            break;
+        }
+    }
+}
+
+/// Watch pods using the low-level WatchStream API.
+/// This demonstrates direct access to raw JSON lines.
+fn watchPodsLowLevel(client: *k8s.Client, namespace: []const u8) !void {
+    var stream = try k8s.WatchStream.init(
+        client,
+        namespace,
+        k8s.resource_info.pod,
+        .{},
+    );
+    defer stream.deinit();
+
+    std.debug.print("  Watching for raw events...\n", .{});
+
+    var event_count: usize = 0;
+    while (try stream.readLine()) |line| {
+        defer stream.allocator.free(line);
+
+        // Parse just the event type using std.json.Value for demonstration
+        const parsed = std.json.parseFromSlice(std.json.Value, stream.allocator, line, .{
+            .ignore_unknown_fields = true,
+        }) catch {
+            std.debug.print("  Failed to parse event JSON\n", .{});
+            continue;
+        };
+        defer parsed.deinit();
+
+        const event_type = if (parsed.value.object.get("type")) |t| t.string else "?";
+        const obj = parsed.value.object.get("object") orelse continue;
+        const metadata = obj.object.get("metadata") orelse continue;
+        const name = if (metadata.object.get("name")) |n| n.string else "(no name)";
+        const rv = if (metadata.object.get("resourceVersion")) |r| r.string else "?";
+
+        std.debug.print("  [{s}] {s} (rv={s}, {d} bytes)\n", .{ event_type, name, rv, line.len });
+
+        event_count += 1;
+        if (event_count >= 5) {
+            std.debug.print("  (stopping after 5 events)\n", .{});
+            break;
+        }
     }
 }

@@ -3,9 +3,17 @@
 
 const std = @import("std");
 const tls = @import("tls");
-const Client = @import("../client/Client.zig").Client;
+const protobuf = @import("protobuf");
+const client_mod = @import("../client/Client.zig");
+const Client = client_mod.Client;
+const ContentType = client_mod.ContentType;
 const ResourceInfo = @import("typed.zig").ResourceInfo;
 const proto = @import("../proto/mod.zig");
+const runtime = @import("../proto/k8s/io/apimachinery/pkg/runtime.pb.zig");
+const metav1 = @import("../proto/k8s/io/apimachinery/pkg/apis/meta/v1.pb.zig");
+
+/// Kubernetes protobuf magic bytes
+const K8S_PROTOBUF_MAGIC = "k8s\x00";
 
 // ============================================================================
 // Constants
@@ -36,6 +44,10 @@ pub const WatchOptions = struct {
 
     /// Request bookmark events for efficient reconnection.
     allowWatchBookmarks: bool = true,
+
+    /// Content type for the response (json or protobuf).
+    /// Protobuf is more efficient and avoids JSON map field issues.
+    contentType: ContentType = .protobuf,
 };
 
 /// Event types from Kubernetes watch API.
@@ -53,6 +65,7 @@ pub const EventType = enum {
         if (std.mem.eql(u8, s, "DELETED")) return .DELETED;
         if (std.mem.eql(u8, s, "BOOKMARK")) return .BOOKMARK;
         if (std.mem.eql(u8, s, "ERROR")) return .ERROR;
+        return error.UnknownEventType;
     }
 };
 
@@ -61,23 +74,41 @@ pub fn WatchEvent(comptime T: type) type {
     return struct {
         const Self = @This();
 
-        const RawEvent = struct {
-            type: []const u8,
+        /// Raw event structure matching Kubernetes watch API response (JSON mode).
+        pub const RawEvent = struct {
+            @"type": []const u8,
             object: T,
         };
 
         event_type: EventType,
-        _parsed: std.json.Parsed(RawEvent),
+        // For JSON mode
+        _json_parsed: ?std.json.Parsed(RawEvent) = null,
+        // For protobuf mode
+        _protobuf_value: ?T = null,
+        _allocator: ?std.mem.Allocator = null,
+        _is_protobuf: bool = false,
 
         /// Parsed resource object.
         /// For BOOKMARK events, only metadata.resourceVersion is populated.
         pub fn object(self: Self) T {
-            return self._parsed.value.object;
+            if (self._is_protobuf) {
+                return self._protobuf_value.?;
+            } else {
+                return self._json_parsed.?.value.object;
+            }
         }
 
         /// Free the parsed object memory.
         pub fn deinit(self: *Self) void {
-            self._parsed.deinit();
+            if (self._is_protobuf) {
+                if (self._protobuf_value) |*val| {
+                    protobuf.deinit(self._allocator.?, val);
+                }
+            } else {
+                if (self._json_parsed) |*parsed| {
+                    parsed.deinit();
+                }
+            }
         }
     };
 }
@@ -107,8 +138,8 @@ pub const WatchStream = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
 
-    // Connection state
-    tls_conn: tls.Connection,
+    // Connection state (pointer to avoid move issues)
+    tls_conn: *tls.Connection,
     tcp_stream: std.Io.net.Stream,
 
     // HTTP parsing state
@@ -126,6 +157,9 @@ pub const WatchStream = struct {
 
     // Stream state
     closed: bool,
+
+    // Content type (json or protobuf)
+    content_type: ContentType,
 
     // ========================================================================
     // Public Methods
@@ -150,28 +184,35 @@ pub const WatchStream = struct {
             return error.ConnectionFailed;
         errdefer tcp_stream.close(client.io);
 
-        // 3. Upgrade to TLS
+        // 3. Allocate TLS connection on heap to avoid move issues
+        const tls_conn = try client.allocator.create(tls.Connection);
+        errdefer client.allocator.destroy(tls_conn);
+
+        // 4. Upgrade to TLS
         const rng_impl: std.Random.IoSource = .{ .io = client.io };
         const rng = rng_impl.interface();
         const now = std.Io.Clock.real.now(client.io);
 
-        var tls_conn = tls.clientFromStream(client.io, tcp_stream, .{
+        tls_conn.* = tls.clientFromStream(client.io, tcp_stream, .{
             .rng = rng,
             .now = now,
             .host = client.host,
             .root_ca = client.ca_bundle,
-        }) catch return error.TlsError;
+        }) catch {
+            // Don't manually destroy - let errdefer handle it
+            return error.TlsError;
+        };
         errdefer tls_conn.close() catch {};
 
-        // 4. Send HTTP GET request
-        try sendWatchRequest(&tls_conn, client, path);
+        // 5. Send HTTP GET request
+        try sendWatchRequest(tls_conn, client, path, options.contentType);
 
         return Self{
             .allocator = client.allocator,
             .io = client.io,
             .tls_conn = tls_conn,
             .tcp_stream = tcp_stream,
-            .headers_parsed = false,
+            .header_parsed = false,
             .is_chunked = false,
             .chunk_remaining = 0,
             .line_buffer = .empty,
@@ -179,15 +220,19 @@ pub const WatchStream = struct {
             .read_buffer_pos = 0,
             .read_buffer_len = 0,
             .closed = false,
+            .content_type = options.contentType,
         };
     }
 
     /// Clean up resources and close connection.
     pub fn deinit(self: *Self) void {
         self.line_buffer.deinit(self.allocator);
-        self.tls_conn.close();
-        self.tcp_stream.close(self.io);
-        self.closed = true;
+        if (!self.closed) {
+            self.tls_conn.close() catch {};
+            self.tcp_stream.close(self.io);
+            self.closed = true;
+        }
+        self.allocator.destroy(self.tls_conn);
     }
 
     /// Check if the stream has been closed.
@@ -202,6 +247,7 @@ pub const WatchStream = struct {
             self.tcp_stream.close(self.io);
             self.closed = true;
         }
+        // Note: tls_conn memory is freed in deinit()
     }
 
     /// Read Raw bytes from the TLS connection.
@@ -222,8 +268,64 @@ pub const WatchStream = struct {
         return n;
     }
 
+    /// Read the next protobuf event from the stream.
+    /// For protobuf mode: reads length-prefixed k8s protobuf envelope.
+    /// Returns null when stream ends.
+    /// Caller owns returned slice and must deallocate with self.allocator.
+    pub fn readProtobufEvent(self: *Self) !?[]u8 {
+        if (self.closed) return null;
+
+        // Parse HTTP headers on first call
+        if (!self.header_parsed) {
+            try self.parseHTTPHeaders();
+        }
+
+        // Read the 4-byte length prefix
+        var len_buf: [4]u8 = undefined;
+        var len_read: usize = 0;
+        while (len_read < 4) {
+            const bytes_read = try self.readMoreData();
+            if (bytes_read == 0) {
+                if (len_read == 0) return null; // Clean EOF
+                return error.UnexpectedEndOfStream;
+            }
+            // Copy from line_buffer to len_buf
+            const available = self.line_buffer.items.len;
+            const needed = 4 - len_read;
+            const to_copy = @min(available, needed);
+            @memcpy(len_buf[len_read..][0..to_copy], self.line_buffer.items[0..to_copy]);
+            len_read += to_copy;
+            // Remove copied bytes from line_buffer
+            const remaining = self.line_buffer.items[to_copy..];
+            @memmove(self.line_buffer.items[0..remaining.len], remaining);
+            self.line_buffer.items.len = remaining.len;
+        }
+
+        // Parse length as big-endian u32
+        const event_len: usize = @as(usize, std.mem.readInt(u32, &len_buf, .big));
+        if (event_len == 0) return null;
+        if (event_len > 10 * 1024 * 1024) return error.EventTooLarge; // 10MB limit
+
+        // Read the event data
+        while (self.line_buffer.items.len < event_len) {
+            const bytes_read = try self.readMoreData();
+            if (bytes_read == 0) return error.UnexpectedEndOfStream;
+        }
+
+        // Extract the event data
+        const event_data = try self.allocator.dupe(u8, self.line_buffer.items[0..event_len]);
+        errdefer self.allocator.free(event_data);
+
+        // Remove event from buffer
+        const remaining = self.line_buffer.items[event_len..];
+        @memmove(self.line_buffer.items[0..remaining.len], remaining);
+        self.line_buffer.items.len = remaining.len;
+
+        return event_data;
+    }
+
     /// Read the next complete JSON line from the stream.
-    /// Headless HTTP chunked encoding and partial line buffering.
+    /// Handles HTTP chunked encoding and partial line buffering.
     /// Returns null when stream ends.
     /// Caller owns returned slice and must deallocate with self.allocator.
     pub fn readLine(self: *Self) !?[]u8 {
@@ -299,6 +401,10 @@ pub const WatchStream = struct {
                 self.line_buffer.items.len = remaining.len;
 
                 self.header_parsed = true;
+                std.debug.print("Headers parsed, remaining in buffer: {d} bytes\n", .{self.line_buffer.items.len});
+                if (self.line_buffer.items.len > 0) {
+                    std.debug.print("First 50 bytes: {s}\n", .{self.line_buffer.items[0..@min(50, self.line_buffer.items.len)]});
+                }
                 return;
             }
 
@@ -314,7 +420,7 @@ pub const WatchStream = struct {
     }
 
     /// Find a complete line in the buffer, extract and return it.
-    fn findLineInBuffer(self: *Self) !?[]const u8 {
+    fn findLineInBuffer(self: *Self) !?[]u8 {
         const newline_idx = std.mem.indexOfScalar(u8, self.line_buffer.items, '\n') orelse
             return null;
 
@@ -387,6 +493,15 @@ pub const WatchStream = struct {
         };
         if (n == 0) return 0;
 
+        // Debug: show what we're adding
+        if (self.line_buffer.items.len == 0) {
+            std.debug.print("First chunk data, n={d}, first 20 hex: ", .{n});
+            for (self.read_buffer[0..@min(20, n)]) |b| {
+                std.debug.print("{x:0>2} ", .{b});
+            }
+            std.debug.print("\n", .{});
+        }
+
         try self.line_buffer.appendSlice(self.allocator, self.read_buffer[0..n]);
         self.chunk_remaining -= n;
 
@@ -400,46 +515,49 @@ pub const WatchStream = struct {
 
     /// Read and parse chunk size line (e.g., "4a\r\n" -> 74).
     fn readChunkSize(self: *Self) !void {
-        // Accumulate bytes until we find CRLF
-        var size_buf: [32]u8 = undefined;
+        // Read chunk size line into buffer - look for \r\n
+        var size_buf: [64]u8 = undefined;
         var size_len: usize = 0;
 
-        while (size_len < size_buf.len) {
-            var byte: [1]u8 = undefined;
-            const n = self.tls_conn.read(&byte) catch |err| {
+        // Read bytes until we find \r\n
+        while (size_len < size_buf.len - 1) {
+            // Read one byte at a time using the main read buffer
+            const n = self.tls_conn.read(self.read_buffer[0..1]) catch |err| {
                 if (err == error.EndOfStream) return error.UnexpectedEndOfStream;
                 return err;
             };
             if (n == 0) return error.UnexpectedEndOfStream;
 
-            if (byte[0] == '\r') {
-                // Next byte should be \n
-                const n2 = self.tls_conn.read(&byte) catch |err| {
+            const byte = self.read_buffer[0];
+            if (byte == '\r') {
+                // Read next byte, should be \n
+                const n2 = self.tls_conn.read(self.read_buffer[0..1]) catch |err| {
                     if (err == error.EndOfStream) return error.UnexpectedEndOfStream;
                     return err;
                 };
-                if (n2 == 0 or byte[0] != '\n') {
+                if (n2 == 0 or self.read_buffer[0] != '\n') {
                     return error.InvalidChunkedEncoding;
                 }
                 break;
             }
 
-            size_buf[size_len] = byte[0];
+            size_buf[size_len] = byte;
             size_len += 1;
         }
 
         // parse hex chunk size
         self.chunk_remaining = std.fmt.parseInt(usize, size_buf[0..size_len], 16) catch
             return error.InvalidChunkedEncoding;
+        std.debug.print("Chunk size: {d} (hex: {s})\n", .{ self.chunk_remaining, size_buf[0..size_len] });
     }
 
     /// Consume the trailing CRCL after chunk data.
     fn consumeCRLF(self: *Self) !void {
-        var crlf: [2]u8 = undefined;
+        // Use read_buffer for alignment safety
         var read_total: usize = 0;
 
         while (read_total < 2) {
-            const n = self.tls_conn.read(crlf[read_total..]) catch |err| {
+            const n = self.tls_conn.read(self.read_buffer[read_total..2]) catch |err| {
                 if (err == error.EndOfStream) return error.InvalidChunkedEncoding;
                 return err;
             };
@@ -447,7 +565,7 @@ pub const WatchStream = struct {
             read_total += n;
         }
 
-        if (crlf[0] != '\r' or crlf[1] != '\n') {
+        if (self.read_buffer[0] != '\r' or self.read_buffer[1] != '\n') {
             return error.InvalidChunkedEncoding;
         }
     }
@@ -494,27 +612,114 @@ pub fn Watcher(comptime T: type) type {
         /// Returns null when the stream ends.
         /// Caller must call event.deinit() when done.
         pub fn next(self: *Self) !?WatchEvent(T) {
+            return switch (self.stream.content_type) {
+                .protobuf => self.nextProtobuf(),
+                .json => self.nextJson(),
+            };
+        }
+
+        /// Parse next event from protobuf stream.
+        /// Streaming format: 4-byte big-endian length + WatchEvent protobuf (no k8s envelope)
+        fn nextProtobuf(self: *Self) !?WatchEvent(T) {
+            // Read the next protobuf event (length-prefixed, no k8s envelope for streaming)
+            const event_data = try self.stream.readProtobufEvent() orelse return null;
+            defer self.allocator.free(event_data);
+
+            // Decode WatchEvent directly (streaming format doesn't use k8s envelope)
+            var reader: std.Io.Reader = .fixed(event_data);
+            const watch_event = metav1.WatchEvent.decode(&reader, self.allocator) catch |err| {
+                std.debug.print("Failed to decode WatchEvent: {}\n", .{err});
+                return error.ProtobufDecodeError;
+            };
+            defer {
+                var we = watch_event;
+                we.deinit(self.allocator);
+            }
+
+            // Get event type
+            const event_type = EventType.fromString(watch_event.type orelse "ADDED") catch {
+                return error.UnknownEventType;
+            };
+
+            // The object field contains RawExtension with the serialized resource
+            // For streaming watch, the object is wrapped in k8s envelope
+            const object_ext = watch_event.object orelse {
+                std.debug.print("WatchEvent has no object\n", .{});
+                return error.InvalidResponse;
+            };
+
+            const object_raw = object_ext.raw orelse {
+                std.debug.print("WatchEvent object has no raw data\n", .{});
+                return error.InvalidResponse;
+            };
+
+            // The raw data is k8s envelope format (k8s\x00 + Unknown wrapper)
+            if (object_raw.len < 4 or !std.mem.eql(u8, object_raw[0..4], K8S_PROTOBUF_MAGIC)) {
+                std.debug.print("Invalid K8s protobuf magic in watch object\n", .{});
+                return error.InvalidResponse;
+            }
+
+            // Decode Unknown wrapper from object
+            var unknown_reader: std.Io.Reader = .fixed(object_raw[4..]);
+            const unknown = runtime.Unknown.decode(&unknown_reader, self.allocator) catch |err| {
+                std.debug.print("Failed to decode Unknown wrapper: {}\n", .{err});
+                return error.ProtobufDecodeError;
+            };
+            defer {
+                var u = unknown;
+                u.deinit(self.allocator);
+            }
+
+            // Decode the actual resource from Unknown.raw
+            const resource_raw = unknown.raw orelse {
+                std.debug.print("Unknown wrapper has no raw data\n", .{});
+                return error.InvalidResponse;
+            };
+
+            var obj_reader: std.Io.Reader = .fixed(resource_raw);
+            const resource = T.decode(&obj_reader, self.allocator) catch |err| {
+                std.debug.print("Failed to decode resource {s}: {}\n", .{ @typeName(T), err });
+                return error.ProtobufDecodeError;
+            };
+
+            return WatchEvent(T){
+                .event_type = event_type,
+                ._protobuf_value = resource,
+                ._allocator = self.allocator,
+                ._is_protobuf = true,
+            };
+        }
+
+        /// Parse next event from JSON stream.
+        fn nextJson(self: *Self) !?WatchEvent(T) {
             // Read the next JSON line.
             const line = try self.stream.readLine() orelse return null;
             defer self.allocator.free(line);
 
-            // Parse directly into a struct with the typed object field
+            // Parse watch event directly using the RawEvent struct
+            // T's jsonParse method will be called automatically for the object field
+            @setEvalBranchQuota(1000000);
             const parsed = std.json.parseFromSlice(
                 WatchEvent(T).RawEvent,
                 self.allocator,
                 line,
-                .{ .ignore_unknown_fields = true, .allocate = .alloc_always },
-            ) catch return error.JsonParseError;
+                .{ .ignore_unknown_fields = true, .allocate = .alloc_if_needed },
+            ) catch |err| {
+                std.debug.print("Watch JSON parse error: {}\n", .{err});
+                std.debug.print("Line (first 200 chars): {s}\n", .{line[0..@min(200, line.len)]});
+                return error.JsonParseError;
+            };
 
             // Convert type string to enum
-            const event_type = EventType.fromString(parsed.value.type) orelse {
+            const event_type = EventType.fromString(parsed.value.@"type") catch {
                 parsed.deinit();
                 return error.UnknownEventType;
             };
 
             return WatchEvent(T){
                 .event_type = event_type,
-                ._parsed = parsed,
+                ._json_parsed = parsed,
+                ._is_protobuf = false,
             };
         }
 
@@ -611,7 +816,7 @@ fn buildWatchPath(
     }
 
     if (options.timeoutSeconds) |timeout| {
-        const param = try std.fmt.allocPrint(allocator, "timeoutSeconds={s}", .{timeout});
+        const param = try std.fmt.allocPrint(allocator, "timeoutSeconds={d}", .{timeout});
         try query_parts.append(allocator, param);
     }
 
@@ -644,6 +849,7 @@ fn sendWatchRequest(
     tls_conn: *tls.Connection,
     client: *Client,
     path: []const u8,
+    content_type: ContentType,
 ) !void {
     // Build Authorization header
     const auth_header = if (client.token) |token|
@@ -658,10 +864,10 @@ fn sendWatchRequest(
         "GET {s} HTTP/1.1\r\n" ++
             "Host: {s}\r\n" ++
             "{s}" ++
-            "Accept: application/json\r\n" ++
+            "Accept: {s}\r\n" ++
             "Connection: keep-alive\r\n" ++
             "\r\n",
-        .{ path, client.host, auth_header },
+        .{ path, client.host, auth_header, content_type.acceptHeader() },
     );
     defer client.allocator.free(request);
 
