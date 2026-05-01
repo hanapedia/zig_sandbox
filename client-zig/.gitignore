@@ -3,6 +3,12 @@ zig-out/
 zig-pkg/
 .zig-cache/
 
-# Proto files and generated code (regenerate with: task proto:all)
-proto/
+# Proto files (raw .proto files, regenerate with: task proto:all)
+/proto/
+
+# Generated proto code (regenerate with: task proto:generate)
 src/proto/k8s/
+
+# Keep hand-written proto overrides and mod.zig tracked
+!src/proto/overrides/
+!src/proto/mod.zig

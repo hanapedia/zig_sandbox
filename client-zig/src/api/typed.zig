@@ -32,7 +32,7 @@ pub fn TypedClient(comptime T: type, comptime L: type) type {
         info: ResourceInfo,
 
         /// Get a single resource by name.
-        pub fn get(self: Self, name: []const u8) !std.json.Parsed(T) {
+        pub fn get(self: Self, name: []const u8) !Client.ProtoResult(T) {
             const path = try self.buildResourcePath(name);
             defer self.client.allocator.free(path);
 
@@ -40,7 +40,7 @@ pub fn TypedClient(comptime T: type, comptime L: type) type {
         }
 
         /// List all resources matching the criteria.
-        pub fn list(self: Self, options: ListOptions) !std.json.Parsed(L) {
+        pub fn list(self: Self, options: ListOptions) !Client.ProtoResult(L) {
             const path = try self.buildListPath(options);
             defer self.client.allocator.free(path);
 
