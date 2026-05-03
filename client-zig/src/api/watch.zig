@@ -76,7 +76,7 @@ pub fn WatchEvent(comptime T: type) type {
 
         /// Raw event structure matching Kubernetes watch API response (JSON mode).
         pub const RawEvent = struct {
-            @"type": []const u8,
+            type: []const u8,
             object: T,
         };
 
@@ -141,6 +141,8 @@ pub const WatchStream = struct {
     // Connection state (pointer to avoid move issues)
     tls_conn: *tls.Connection,
     tcp_stream: std.Io.net.Stream,
+    // TLS state - heap allocated to keep buffers alive
+    tls_state: *TlsState,
 
     // HTTP parsing state
     header_parsed: bool,
@@ -160,6 +162,16 @@ pub const WatchStream = struct {
 
     // Content type (json or protobuf)
     content_type: ContentType,
+
+    /// TLS state that must stay at a fixed address for the connection lifetime.
+    /// This fixes the use-after-free bug in tls.clientFromStream() which
+    /// allocates buffers on the stack that go out of scope.
+    const TlsState = struct {
+        input_buf: [tls.input_buffer_len]u8,
+        output_buf: [tls.output_buffer_len]u8,
+        reader: std.Io.net.Stream.Reader,
+        writer: std.Io.net.Stream.Writer,
+    };
 
     // ========================================================================
     // Public Methods
@@ -184,27 +196,35 @@ pub const WatchStream = struct {
             return error.ConnectionFailed;
         errdefer tcp_stream.close(client.io);
 
-        // 3. Allocate TLS connection on heap to avoid move issues
+        // 3. Allocate TLS state on heap - this fixes the use-after-free bug in
+        // tls.clientFromStream() which allocates buffers on the stack
+        const tls_state = try client.allocator.create(TlsState);
+        errdefer client.allocator.destroy(tls_state);
+
+        // Initialize reader and writer with heap-allocated buffers
+        tls_state.reader = tcp_stream.reader(client.io, &tls_state.input_buf);
+        tls_state.writer = tcp_stream.writer(client.io, &tls_state.output_buf);
+
+        // 4. Allocate TLS connection on heap to avoid move issues
         const tls_conn = try client.allocator.create(tls.Connection);
         errdefer client.allocator.destroy(tls_conn);
 
-        // 4. Upgrade to TLS
+        // 5. Upgrade to TLS using tls.client() with heap-allocated reader/writer
         const rng_impl: std.Random.IoSource = .{ .io = client.io };
         const rng = rng_impl.interface();
         const now = std.Io.Clock.real.now(client.io);
 
-        tls_conn.* = tls.clientFromStream(client.io, tcp_stream, .{
+        tls_conn.* = tls.client(&tls_state.reader.interface, &tls_state.writer.interface, .{
             .rng = rng,
             .now = now,
             .host = client.host,
             .root_ca = client.ca_bundle,
         }) catch {
-            // Don't manually destroy - let errdefer handle it
             return error.TlsError;
         };
         errdefer tls_conn.close() catch {};
 
-        // 5. Send HTTP GET request
+        // 6. Send HTTP GET request
         try sendWatchRequest(tls_conn, client, path, options.contentType);
 
         return Self{
@@ -212,6 +232,7 @@ pub const WatchStream = struct {
             .io = client.io,
             .tls_conn = tls_conn,
             .tcp_stream = tcp_stream,
+            .tls_state = tls_state,
             .header_parsed = false,
             .is_chunked = false,
             .chunk_remaining = 0,
@@ -233,6 +254,7 @@ pub const WatchStream = struct {
             self.closed = true;
         }
         self.allocator.destroy(self.tls_conn);
+        self.allocator.destroy(self.tls_state);
     }
 
     /// Check if the stream has been closed.
@@ -281,24 +303,29 @@ pub const WatchStream = struct {
         }
 
         // Read the 4-byte length prefix
+        // First, use any data already in line_buffer before reading more
         var len_buf: [4]u8 = undefined;
         var len_read: usize = 0;
         while (len_read < 4) {
+            // Check if line_buffer has data we can use
+            if (self.line_buffer.items.len > 0) {
+                const available = self.line_buffer.items.len;
+                const needed = 4 - len_read;
+                const to_copy = @min(available, needed);
+                @memcpy(len_buf[len_read..][0..to_copy], self.line_buffer.items[0..to_copy]);
+                len_read += to_copy;
+                // Remove copied bytes from line_buffer
+                const remaining = self.line_buffer.items[to_copy..];
+                @memmove(self.line_buffer.items[0..remaining.len], remaining);
+                self.line_buffer.items.len = remaining.len;
+                continue;
+            }
+            // Need more data from connection
             const bytes_read = try self.readMoreData();
             if (bytes_read == 0) {
                 if (len_read == 0) return null; // Clean EOF
                 return error.UnexpectedEndOfStream;
             }
-            // Copy from line_buffer to len_buf
-            const available = self.line_buffer.items.len;
-            const needed = 4 - len_read;
-            const to_copy = @min(available, needed);
-            @memcpy(len_buf[len_read..][0..to_copy], self.line_buffer.items[0..to_copy]);
-            len_read += to_copy;
-            // Remove copied bytes from line_buffer
-            const remaining = self.line_buffer.items[to_copy..];
-            @memmove(self.line_buffer.items[0..remaining.len], remaining);
-            self.line_buffer.items.len = remaining.len;
         }
 
         // Parse length as big-endian u32
@@ -394,17 +421,25 @@ pub const WatchStream = struct {
                 // Look for "Transfer-Encoding" header containing "chunked"
                 self.is_chunked = std.mem.indexOf(u8, headers, "chunked") != null;
 
-                // Remove headers from buffer, keep body data
+                // Get remaining body data after headers
                 const body_start = end_idx + 4;
                 const remaining = self.line_buffer.items[body_start..];
-                @memmove(self.line_buffer.items[0..remaining.len], remaining);
-                self.line_buffer.items.len = remaining.len;
+
+                // For chunked encoding, move body data to read_buffer (it starts with framing)
+                // For non-chunked, keep it in line_buffer (it's application data)
+                if (self.is_chunked and remaining.len > 0) {
+                    // Move to read_buffer for chunked decoding
+                    @memcpy(self.read_buffer[0..remaining.len], remaining);
+                    self.read_buffer_pos = 0;
+                    self.read_buffer_len = remaining.len;
+                    self.line_buffer.items.len = 0;
+                } else {
+                    // Keep in line_buffer for raw mode
+                    @memmove(self.line_buffer.items[0..remaining.len], remaining);
+                    self.line_buffer.items.len = remaining.len;
+                }
 
                 self.header_parsed = true;
-                std.debug.print("Headers parsed, remaining in buffer: {d} bytes\n", .{self.line_buffer.items.len});
-                if (self.line_buffer.items.len > 0) {
-                    std.debug.print("First 50 bytes: {s}\n", .{self.line_buffer.items[0..@min(50, self.line_buffer.items.len)]});
-                }
                 return;
             }
 
@@ -463,6 +498,62 @@ pub const WatchStream = struct {
         return n;
     }
 
+    // ========================================================================
+    // Buffered Reader Helpers
+    // These use read_buffer as a buffer for TLS reads, avoiding byte-by-byte
+    // TLS operations which can cause parsing issues.
+    // ========================================================================
+
+    /// Get available bytes in read_buffer (not yet consumed).
+    fn bufferedAvailable(self: *Self) []u8 {
+        return self.read_buffer[self.read_buffer_pos..self.read_buffer_len];
+    }
+
+    /// Consume n bytes from the buffered reader.
+    fn bufferedConsume(self: *Self, n: usize) void {
+        self.read_buffer_pos += n;
+        // Reset position when buffer is empty to maximize space for next read
+        if (self.read_buffer_pos >= self.read_buffer_len) {
+            self.read_buffer_pos = 0;
+            self.read_buffer_len = 0;
+        }
+    }
+
+    /// Ensure at least `min_bytes` are available in the buffer.
+    /// Reads from TLS if necessary.
+    fn bufferedEnsure(self: *Self, min_bytes: usize) !bool {
+        while (self.read_buffer_len - self.read_buffer_pos < min_bytes) {
+            // Compact buffer if needed to make room
+            if (self.read_buffer_pos > 0) {
+                const available = self.bufferedAvailable();
+                @memmove(self.read_buffer[0..available.len], available);
+                self.read_buffer_len = available.len;
+                self.read_buffer_pos = 0;
+            }
+
+            // Read more from TLS
+            const space = self.read_buffer[self.read_buffer_len..];
+            if (space.len == 0) return error.BufferFull;
+
+            const n = self.tls_conn.read(space) catch |err| {
+                if (err == error.EndOfStream) return false;
+                // TlsBadVersion during watch can occur when TLS record boundaries
+                // don't align with HTTP chunk boundaries. This is an intermittent issue
+                // that depends on how the server chunks data vs TLS record sizes.
+                // Treat it as connection closure to allow reconnection.
+                if (err == error.TlsBadVersion) {
+                    self.closed = true;
+                    return error.ConnectionLost;
+                }
+                return err;
+            };
+            if (n == 0) return false; // EOF
+
+            self.read_buffer_len += n;
+        }
+        return true;
+    }
+
     /// Read chunked-encoded data.
     ///
     /// Format:
@@ -485,24 +576,19 @@ pub const WatchStream = struct {
             }
         }
 
-        // Read from current chunk (don't read more than chunk_remaining)
-        const to_read = @min(self.chunk_remaining, self.read_buffer.len);
-        const n = self.tls_conn.read(self.read_buffer[0..to_read]) catch |err| {
-            if (err == error.EndOfStream) return 0;
-            return err;
-        };
-        if (n == 0) return 0;
-
-        // Debug: show what we're adding
-        if (self.line_buffer.items.len == 0) {
-            std.debug.print("First chunk data, n={d}, first 20 hex: ", .{n});
-            for (self.read_buffer[0..@min(20, n)]) |b| {
-                std.debug.print("{x:0>2} ", .{b});
-            }
-            std.debug.print("\n", .{});
+        // Ensure we have data in the buffer
+        if (self.bufferedAvailable().len == 0) {
+            const has_data = try self.bufferedEnsure(1);
+            if (!has_data) return 0;
         }
 
-        try self.line_buffer.appendSlice(self.allocator, self.read_buffer[0..n]);
+        // Copy available data (up to chunk_remaining) to line_buffer
+        const available = self.bufferedAvailable();
+        const n = @min(available.len, self.chunk_remaining);
+        if (n == 0) return 0;
+
+        try self.line_buffer.appendSlice(self.allocator, available[0..n]);
+        self.bufferedConsume(n);
         self.chunk_remaining -= n;
 
         // If chunk finished, consume trailing CRLF
@@ -514,60 +600,52 @@ pub const WatchStream = struct {
     }
 
     /// Read and parse chunk size line (e.g., "4a\r\n" -> 74).
+    /// Uses the buffered reader to avoid byte-by-byte TLS reads.
+    /// Framing data stays in read_buffer, never goes to line_buffer.
     fn readChunkSize(self: *Self) !void {
-        // Read chunk size line into buffer - look for \r\n
-        var size_buf: [64]u8 = undefined;
-        var size_len: usize = 0;
+        // Keep reading until we find \r\n in the buffered reader
+        while (true) {
+            const available = self.bufferedAvailable();
 
-        // Read bytes until we find \r\n
-        while (size_len < size_buf.len - 1) {
-            // Read one byte at a time using the main read buffer
-            const n = self.tls_conn.read(self.read_buffer[0..1]) catch |err| {
-                if (err == error.EndOfStream) return error.UnexpectedEndOfStream;
-                return err;
-            };
-            if (n == 0) return error.UnexpectedEndOfStream;
+            // Look for \r\n in buffered data
+            if (std.mem.indexOf(u8, available, "\r\n")) |crlf_pos| {
+                // Found it - parse the chunk size
+                const size_str = available[0..crlf_pos];
 
-            const byte = self.read_buffer[0];
-            if (byte == '\r') {
-                // Read next byte, should be \n
-                const n2 = self.tls_conn.read(self.read_buffer[0..1]) catch |err| {
-                    if (err == error.EndOfStream) return error.UnexpectedEndOfStream;
-                    return err;
-                };
-                if (n2 == 0 or self.read_buffer[0] != '\n') {
-                    return error.InvalidChunkedEncoding;
+                if (size_str.len == 0 or size_str.len > 16) {
+                    return error.InvalidChunkedEncodingSize;
                 }
-                break;
+
+                self.chunk_remaining = std.fmt.parseInt(usize, size_str, 16) catch {
+                    return error.InvalidChunkedEncodingSize;
+                };
+
+                // Consume the chunk size line (including \r\n) from buffered reader
+                self.bufferedConsume(crlf_pos + 2);
+                return;
             }
 
-            size_buf[size_len] = byte;
-            size_len += 1;
+            // No \r\n found yet - read more data into buffer
+            const has_data = try self.bufferedEnsure(available.len + 1);
+            if (!has_data) return error.UnexpectedEndOfStream;
         }
-
-        // parse hex chunk size
-        self.chunk_remaining = std.fmt.parseInt(usize, size_buf[0..size_len], 16) catch
-            return error.InvalidChunkedEncoding;
-        std.debug.print("Chunk size: {d} (hex: {s})\n", .{ self.chunk_remaining, size_buf[0..size_len] });
     }
 
-    /// Consume the trailing CRCL after chunk data.
+    /// Consume the trailing CRLF after chunk data.
+    /// Uses the buffered reader to avoid byte-by-byte TLS reads.
     fn consumeCRLF(self: *Self) !void {
-        // Use read_buffer for alignment safety
-        var read_total: usize = 0;
+        // Ensure we have at least 2 bytes in buffer
+        const has_data = try self.bufferedEnsure(2);
+        if (!has_data) return error.InvalidChunkedEncoding;
 
-        while (read_total < 2) {
-            const n = self.tls_conn.read(self.read_buffer[read_total..2]) catch |err| {
-                if (err == error.EndOfStream) return error.InvalidChunkedEncoding;
-                return err;
-            };
-            if (n == 0) return error.InvalidChunkedEncoding;
-            read_total += n;
-        }
+        const available = self.bufferedAvailable();
 
-        if (self.read_buffer[0] != '\r' or self.read_buffer[1] != '\n') {
+        // Verify and consume \r\n
+        if (available[0] != '\r' or available[1] != '\n') {
             return error.InvalidChunkedEncoding;
         }
+
+        self.bufferedConsume(2);
     }
 };
 
@@ -594,6 +672,9 @@ pub fn Watcher(comptime T: type) type {
 
         stream: WatchStream,
         allocator: std.mem.Allocator,
+        /// Last seen resourceVersion for reconnection.
+        /// Updated from BOOKMARK events and successful event processing.
+        last_resource_version: ?[]const u8 = null,
 
         /// Initialize a watcher for the given resource type.
         pub fn init(
@@ -606,6 +687,12 @@ pub fn Watcher(comptime T: type) type {
                 .stream = try WatchStream.init(client, namespace, info, options),
                 .allocator = client.allocator,
             };
+        }
+
+        /// Get the last seen resourceVersion for reconnection.
+        /// Returns null if no events have been processed yet.
+        pub fn getLastResourceVersion(self: *Self) ?[]const u8 {
+            return self.last_resource_version;
         }
 
         /// Get the next watch event.
@@ -627,8 +714,7 @@ pub fn Watcher(comptime T: type) type {
 
             // Decode WatchEvent directly (streaming format doesn't use k8s envelope)
             var reader: std.Io.Reader = .fixed(event_data);
-            const watch_event = metav1.WatchEvent.decode(&reader, self.allocator) catch |err| {
-                std.debug.print("Failed to decode WatchEvent: {}\n", .{err});
+            const watch_event = metav1.WatchEvent.decode(&reader, self.allocator) catch {
                 return error.ProtobufDecodeError;
             };
             defer {
@@ -644,25 +730,21 @@ pub fn Watcher(comptime T: type) type {
             // The object field contains RawExtension with the serialized resource
             // For streaming watch, the object is wrapped in k8s envelope
             const object_ext = watch_event.object orelse {
-                std.debug.print("WatchEvent has no object\n", .{});
                 return error.InvalidResponse;
             };
 
             const object_raw = object_ext.raw orelse {
-                std.debug.print("WatchEvent object has no raw data\n", .{});
                 return error.InvalidResponse;
             };
 
             // The raw data is k8s envelope format (k8s\x00 + Unknown wrapper)
             if (object_raw.len < 4 or !std.mem.eql(u8, object_raw[0..4], K8S_PROTOBUF_MAGIC)) {
-                std.debug.print("Invalid K8s protobuf magic in watch object\n", .{});
                 return error.InvalidResponse;
             }
 
             // Decode Unknown wrapper from object
             var unknown_reader: std.Io.Reader = .fixed(object_raw[4..]);
-            const unknown = runtime.Unknown.decode(&unknown_reader, self.allocator) catch |err| {
-                std.debug.print("Failed to decode Unknown wrapper: {}\n", .{err});
+            const unknown = runtime.Unknown.decode(&unknown_reader, self.allocator) catch {
                 return error.ProtobufDecodeError;
             };
             defer {
@@ -672,13 +754,11 @@ pub fn Watcher(comptime T: type) type {
 
             // Decode the actual resource from Unknown.raw
             const resource_raw = unknown.raw orelse {
-                std.debug.print("Unknown wrapper has no raw data\n", .{});
                 return error.InvalidResponse;
             };
 
             var obj_reader: std.Io.Reader = .fixed(resource_raw);
-            const resource = T.decode(&obj_reader, self.allocator) catch |err| {
-                std.debug.print("Failed to decode resource {s}: {}\n", .{ @typeName(T), err });
+            const resource = T.decode(&obj_reader, self.allocator) catch {
                 return error.ProtobufDecodeError;
             };
 
@@ -704,14 +784,12 @@ pub fn Watcher(comptime T: type) type {
                 self.allocator,
                 line,
                 .{ .ignore_unknown_fields = true, .allocate = .alloc_if_needed },
-            ) catch |err| {
-                std.debug.print("Watch JSON parse error: {}\n", .{err});
-                std.debug.print("Line (first 200 chars): {s}\n", .{line[0..@min(200, line.len)]});
+            ) catch {
                 return error.JsonParseError;
             };
 
             // Convert type string to enum
-            const event_type = EventType.fromString(parsed.value.@"type") catch {
+            const event_type = EventType.fromString(parsed.value.type) catch {
                 parsed.deinit();
                 return error.UnknownEventType;
             };

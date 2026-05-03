@@ -35,12 +35,14 @@ tasks:
   k8s:deploy:
     desc: Deploy to Kubernetes (creates SA, RBAC, and Pod)
     cmds:
-      - kubectl apply -f manifests/
+      - kubectl apply -f manifests/rbac.yaml
+      - kubectl apply -f manifests/pod.yaml
 
   k8s:delete:
     desc: Delete Kubernetes resources
     cmds:
-      - kubectl delete -f manifests/ --ignore-not-found
+      - kubectl delete -f manifests/pod.yaml --ignore-not-found
+      - kubectl delete -f manifests/rbac.yaml --ignore-not-found
 
   k8s:logs:
     desc: View pod logs

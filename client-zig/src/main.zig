@@ -186,9 +186,9 @@ fn watchPods(client: *k8s.Client, namespace: []const u8) !void {
 
         event_count += 1;
 
-        // For demo purposes, stop after 3 events
-        if (event_count >= 3) {
-            std.debug.print("  (stopping after 3 events)\n", .{});
+        // For demo purposes, stop after 100 events
+        if (event_count >= 100) {
+            std.debug.print("  (stopping after 100 events)\n", .{});
             break;
         }
     }
