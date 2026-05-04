@@ -28,6 +28,9 @@ const AllowWatchBookmarksQueryPart = "allowWatchBookmarks=true";
 
 /// Options for Watch operations.
 pub const WatchOptions = struct {
+    /// must be true
+    watch: bool = true,
+
     /// Start watching from this resource vsersion.
     /// If null, watches from current version.
     resourceVersion: ?[]const u8 = null,
@@ -44,10 +47,6 @@ pub const WatchOptions = struct {
 
     /// Request bookmark events for efficient reconnection.
     allowWatchBookmarks: bool = true,
-
-    /// Content type for the response (json or protobuf).
-    /// Protobuf is more efficient and avoids JSON map field issues.
-    contentType: ContentType = .protobuf,
 };
 
 /// Event types from Kubernetes watch API.
@@ -183,9 +182,10 @@ pub const WatchStream = struct {
         namespace: ?[]const u8,
         info: ResourceInfo,
         options: WatchOptions,
+        content_type: ContentType,
     ) !Self {
         // 1. Build the watch URL path
-        const path = try buildWatchPath(client.allocator, namespace, info, options);
+        const path = try info.buildPath(client.allocator, namespace, null, .{ .watch = options });
         defer client.allocator.free(path);
 
         // 2. Establish TCP connection
@@ -225,7 +225,7 @@ pub const WatchStream = struct {
         errdefer tls_conn.close() catch {};
 
         // 6. Send HTTP GET request
-        try sendWatchRequest(tls_conn, client, path, options.contentType);
+        try sendWatchRequest(tls_conn, client, path, content_type);
 
         return Self{
             .allocator = client.allocator,
@@ -241,7 +241,7 @@ pub const WatchStream = struct {
             .read_buffer_pos = 0,
             .read_buffer_len = 0,
             .closed = false,
-            .content_type = options.contentType,
+            .content_type = content_type,
         };
     }
 
@@ -684,7 +684,7 @@ pub fn Watcher(comptime T: type) type {
             options: WatchOptions,
         ) !Self {
             return Self{
-                .stream = try WatchStream.init(client, namespace, info, options),
+                .stream = try WatchStream.init(client, namespace, info, options, .protobuf),
                 .allocator = client.allocator,
             };
         }
@@ -823,98 +823,6 @@ pub fn Watcher(comptime T: type) type {
     };
 }
 
-fn buildWatchPath(
-    allocator: std.mem.Allocator,
-    namespace: ?[]const u8,
-    info: ResourceInfo,
-    options: WatchOptions,
-) ![]const u8 {
-    // Build base path (same as list path)
-    var base_path: []const u8 = undefined;
-    // namespaced resources
-    if (info.namespaced) {
-        if (namespace) |ns| {
-            // core api group
-            if (info.api_group.len == 0) {
-                base_path = try std.fmt.allocPrint(allocator, "/api/{s}/namespaces/{s}/{s}", .{
-                    info.api_version, ns, info.plural,
-                });
-            } else {
-                base_path = try std.fmt.allocPrint(allocator, "/api/{s}/{s}/namespaces/{s}/{s}", .{
-                    info.api_group, info.api_version, ns, info.plural,
-                });
-            }
-        } else {
-            // watch across namespaces
-            if (info.api_group.len == 0) {
-                base_path = try std.fmt.allocPrint(allocator, "/api/{s}/{s}", .{
-                    info.api_version, info.plural,
-                });
-            } else {
-                base_path = try std.fmt.allocPrint(allocator, "/api/{s}/{s}/{s}", .{
-                    info.api_group, info.api_version, info.plural,
-                });
-            }
-        }
-    } else {
-        // Cluster-scoped resource (no namespace)
-        if (info.api_group.len == 0) {
-            base_path = try std.fmt.allocPrint(allocator, "/api/{s}/{s}", .{
-                info.api_version, info.plural,
-            });
-        } else {
-            base_path = try std.fmt.allocPrint(allocator, "/apis/{s}/{s}/{s}", .{
-                info.api_group, info.api_version, info.plural,
-            });
-        }
-    }
-    defer allocator.free(base_path);
-
-    // Build query parameters
-    var query_parts: std.ArrayList([]const u8) = .empty;
-    defer {
-        for (query_parts.items) |part| {
-            if (!isStaticString(part)) {
-                allocator.free(part);
-            }
-        }
-        query_parts.deinit(allocator);
-    }
-
-    // Always add watch=true
-    try query_parts.append(allocator, WatchQueryPart);
-
-    if (options.allowWatchBookmarks) {
-        try query_parts.append(allocator, AllowWatchBookmarksQueryPart);
-    }
-
-    if (options.resourceVersion) |rv| {
-        const param = try std.fmt.allocPrint(allocator, "resourceVersion={s}", .{rv});
-        try query_parts.append(allocator, param);
-    }
-
-    if (options.timeoutSeconds) |timeout| {
-        const param = try std.fmt.allocPrint(allocator, "timeoutSeconds={d}", .{timeout});
-        try query_parts.append(allocator, param);
-    }
-
-    if (options.labelSelector) |ls| {
-        const param = try std.fmt.allocPrint(allocator, "labelSelector={s}", .{ls});
-        try query_parts.append(allocator, param);
-    }
-
-    if (options.fieldSelector) |fs| {
-        const param = try std.fmt.allocPrint(allocator, "fieldSelector={s}", .{fs});
-        try query_parts.append(allocator, param);
-    }
-
-    // Join the query params
-    const query = try std.mem.join(allocator, "&", query_parts.items);
-    defer allocator.free(query);
-
-    return std.fmt.allocPrint(allocator, "{s}?{s}", .{ base_path, query });
-}
-
 /// Check if a string is a static/comptime string (shouldn't be freed).
 fn isStaticString(s: []const u8) bool {
     // Static strings we use
@@ -956,57 +864,6 @@ fn sendWatchRequest(
 // ============================================================================
 // Tests
 // ============================================================================
-
-test "buildWatchPath basic" {
-    const allocator = std.testing.allocator;
-
-    const path = try buildWatchPath(allocator, "default", .{
-        .api_version = "v1",
-        .api_group = "",
-        .plural = "pods",
-        .namespaced = true,
-    }, .{});
-    defer allocator.free(path);
-
-    try std.testing.expect(std.mem.indexOf(u8, path, "/api/v1/namespaces/default/pods") != null);
-    try std.testing.expect(std.mem.indexOf(u8, path, "watch=true") != null);
-}
-
-test "buildWatchPath with options" {
-    const allocator = std.testing.allocator;
-
-    const path = try buildWatchPath(allocator, "kube-system", .{
-        .api_version = "v1",
-        .api_group = "apps",
-        .plural = "deployments",
-        .namespaced = true,
-    }, .{
-        .resourceVersion = "12345",
-        .labelSelector = "app=nginx",
-        .timeoutSeconds = 300,
-    });
-    defer allocator.free(path);
-
-    try std.testing.expect(std.mem.indexOf(u8, path, "resourceVersion=12345") != null);
-    try std.testing.expect(std.mem.indexOf(u8, path, "labelSelector=app=nginx") != null);
-    try std.testing.expect(std.mem.indexOf(u8, path, "timeoutSeconds=300") != null);
-}
-
-test "buildWatchPath cluster-scoped" {
-    const allocator = std.testing.allocator;
-
-    const path = try buildWatchPath(allocator, null, .{
-        .api_version = "v1",
-        .api_group = "",
-        .plural = "nodes",
-        .namespaced = false,
-    }, .{});
-    defer allocator.free(path);
-
-    try std.testing.expect(std.mem.indexOf(u8, path, "/api/v1/nodes") != null);
-    try std.testing.expect(std.mem.indexOf(u8, path, "namespaces") == null);
-}
-
 test "EventType parsing" {
     try std.testing.expectEqual(EventType.ADDED, try EventType.fromString("ADDED"));
     try std.testing.expectEqual(EventType.MODIFIED, try EventType.fromString("MODIFIED"));

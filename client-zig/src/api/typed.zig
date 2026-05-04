@@ -6,10 +6,111 @@ const Client = @import("../client/Client.zig").Client;
 
 /// ResourceInfo describes the API path information for a Kubernetes resource.
 pub const ResourceInfo = struct {
+    const Self = @This();
+
     api_version: []const u8,
     api_group: []const u8,
     plural: []const u8,
     namespaced: bool,
+
+    pub fn buildPath(self: Self, allocator: std.mem.Allocator, namespace: ?[]const u8, name: ?[]const u8, query_params: ?QueryParams) ![]const u8 {
+        var path: std.ArrayList(u8) = .empty;
+        errdefer path.deinit(allocator);
+
+        if (self.api_group.len == 0) {
+            try path.appendSlice(allocator, "/api/");
+            try path.appendSlice(allocator, self.api_version);
+        } else {
+            try path.appendSlice(allocator, "/apis/");
+            try path.appendSlice(allocator, self.api_group);
+            try path.appendSlice(allocator, "/");
+            try path.appendSlice(allocator, self.api_version);
+        }
+
+        if (self.namespaced) {
+            try path.appendSlice(allocator, "/namespaces/");
+            try path.appendSlice(allocator, namespace orelse "default");
+        }
+
+        try path.appendSlice(allocator, "/");
+        try path.appendSlice(allocator, self.plural);
+        if (name) |n| {
+            try path.appendSlice(allocator, "/");
+            try path.appendSlice(allocator, n);
+        }
+
+        if (query_params) |params| {
+            if (try params.toString(allocator)) |query_str| {
+                defer allocator.free(query_str);
+                try path.appendSlice(allocator, query_str);
+            }
+        }
+        return path.toOwnedSlice(allocator);
+    }
+};
+
+/// Query parameters that can be added to any path
+const QueryParams = union(enum) {
+    list: ListOptions,
+    delete: DeleteOptions,
+    watch: watcher.WatchOptions,
+    create: CreateOptions,
+    update: UpdateOptions,
+    patch: PatchOptions,
+    none,
+
+    fn toString(self: QueryParams, allocator: std.mem.Allocator) !?[]const u8 {
+        return switch (self) {
+            .none => null,
+            inline else => |opts| serializeQueryParams(allocator, opts),
+        };
+    }
+
+    fn serializeQueryParams(allocator: std.mem.Allocator, options: anytype) !?[]const u8 {
+        const T = @TypeOf(options);
+        const fields = @typeInfo(T).@"struct".fields;
+
+        var params: std.ArrayList(u8) = .empty;
+        errdefer params.deinit(allocator);
+
+        var first = true;
+        inline for (fields) |field| {
+            const value = @field(options, field.name);
+            try appendParam(allocator, &params, &first, field.name, value);
+        }
+
+        if (params.items.len == 0) return null;
+        return try params.toOwnedSlice(allocator);
+    }
+
+    fn appendParam(allocator: std.mem.Allocator, params: *std.ArrayList(u8), first: *bool, name: []const u8, value: anytype) !void {
+        const T = @TypeOf(value);
+
+        // Handle different types
+        if (@typeInfo(T) == .optional) {
+            if (value) |v| {
+                try appendParam(allocator, params, first, name, v);
+            }
+        } else if (T == bool) {
+            if (value) {
+                try writeParam(allocator, params, first, name, "true");
+            }
+        } else if (@typeInfo(T) == .int) {
+            var buf: [20]u8 = undefined;
+            const str = std.fmt.bufPrint(&buf, "{d}", .{value}) catch unreachable;
+            try writeParam(allocator, params, first, name, str);
+        } else if (T == []const u8) {
+            try writeParam(allocator, params, first, name, value);
+        }
+    }
+
+    fn writeParam(allocator: std.mem.Allocator, params: *std.ArrayList(u8), first: *bool, key: []const u8, value: []const u8) !void {
+        try params.append(allocator, if (first.*) '?' else '&');
+        first.* = false;
+        try params.appendSlice(allocator, key);
+        try params.append(allocator, '=');
+        try params.appendSlice(allocator, value);
+    }
 };
 
 /// Options for list operations.
@@ -18,6 +119,40 @@ pub const ListOptions = struct {
     fieldSelector: ?[]const u8 = null,
     limit: ?i64 = null,
     continueToken: ?[]const u8 = null,
+};
+
+/// Options for create operations.
+pub const CreateOptions = struct {
+    dryRun: ?[]const u8 = null, // "All"
+    fieldValidation: ?[]const u8 = null, // "Strict" | "Warn" | "Ignore"
+};
+
+/// Options for update operations.
+pub const UpdateOptions = struct {
+    dryRun: ?[]const u8 = null, // "All"
+    fieldValidation: ?[]const u8 = null, // "Strict" | "Warn" | "Ignore"
+};
+
+/// Options for patch operations.
+pub const PatchOptions = struct {
+    dryRun: ?[]const u8 = null, // "All"
+    fieldValidation: ?[]const u8 = null, // "Strict" | "Warn" | "Ignore"
+    fieldManager: ?[]const u8 = null, // for server-side apply
+};
+
+/// Options for delete operations.
+pub const DeleteOptions = struct {
+    gracePeriodSeconds: ?i64 = null,
+    propagationPolicy: ?[]const u8 = null, // "Orphaned" | "Background" | "Foreground"
+    dryRun: ?[]const u8 = null, // "All"
+};
+
+/// Options for delete collection operations.
+pub const DeleteCollectionOptions = struct {
+    labelSelector: ?[]const u8 = null,
+    fieldSelector: ?[]const u8 = null,
+    gracePeriodSeconds: ?i64 = null,
+    propagationPolicy: ?[]const u8 = null, // "Orphaned" | "Background" | "Foreground"
 };
 
 /// TypedClient provides type-safe operations for a specific Kubernetes resource type.
@@ -33,7 +168,7 @@ pub fn TypedClient(comptime T: type, comptime L: type) type {
 
         /// Get a single resource by name.
         pub fn get(self: Self, name: []const u8) !Client.ProtoResult(T) {
-            const path = try self.buildResourcePath(name);
+            const path = try self.pathForGet(name);
             defer self.client.allocator.free(path);
 
             return self.client.get(T, path);
@@ -41,7 +176,7 @@ pub fn TypedClient(comptime T: type, comptime L: type) type {
 
         /// List all resources matching the criteria.
         pub fn list(self: Self, options: ListOptions) !Client.ProtoResult(L) {
-            const path = try self.buildListPath(options);
+            const path = try self.pathForList(options);
             defer self.client.allocator.free(path);
 
             return self.client.get(L, path);
@@ -51,7 +186,7 @@ pub fn TypedClient(comptime T: type, comptime L: type) type {
         /// Returns a Watcher that yields typed WatchEvent(T) objects.
         ///
         /// Example:
-        /// 
+        ///
         /// var watcher = try k8s.pods(&client, "default").watch(.{});
         /// defer watcher.deinit();
         ///
@@ -63,158 +198,24 @@ pub fn TypedClient(comptime T: type, comptime L: type) type {
             return watcher.Watcher(T).init(self.client, self.namespace, self.info, options);
         }
 
-        fn buildResourcePath(self: Self, name: []const u8) ![]const u8 {
-            if (self.info.namespaced) {
-                const ns = self.namespace orelse "default";
-
-                if (self.info.api_group.len == 0) {
-                    return try std.fmt.allocPrint(self.client.allocator, "/api/{s}/namespaces/{s}/{s}/{s}", .{
-                        self.info.api_version,
-                        ns,
-                        self.info.plural,
-                        name,
-                    });
-                } else {
-                    return try std.fmt.allocPrint(self.client.allocator, "/apis/{s}/{s}/namespaces/{s}/{s}/{s}", .{
-                        self.info.api_group,
-                        self.info.api_version,
-                        ns,
-                        self.info.plural,
-                        name,
-                    });
-                }
-            } else {
-                // Cluster-scoped resource
-                if (self.info.api_group.len == 0) {
-                    return try std.fmt.allocPrint(self.client.allocator, "/api/{s}/{s}/{s}", .{
-                        self.info.api_version,
-                        self.info.plural,
-                        name,
-                    });
-                } else {
-                    return try std.fmt.allocPrint(self.client.allocator, "/apis/{s}/{s}/{s}/{s}", .{
-                        self.info.api_group,
-                        self.info.api_version,
-                        self.info.plural,
-                        name,
-                    });
-                }
-            }
+        /// GET single resourcs
+        pub fn pathForGet(self: Self, name: []const u8) ![]const u8 {
+            return self.info.buildPath(self.client.allocator, self.namespace, name, null);
         }
 
-        fn buildListPath(self: Self, options: ListOptions) ![]const u8 {
-            const allocator = self.client.allocator;
+        /// LIST resources
+        pub fn pathForList(self: Self, options: ListOptions) ![]const u8 {
+            return self.info.buildPath(self.client.allocator, self.namespace, null, .{ .list = options });
+        }
 
-            // Build base path
-            var base_path: []const u8 = undefined;
+        /// WATCH resources
+        pub fn pathForWatch(self: Self, options: watcher.WatchOptions) ![]const u8 {
+            return self.info.buildPath(self.client.allocator, self.namespace, null, .{ .watch = options });
+        }
 
-            if (self.info.namespaced) {
-                if (self.namespace) |ns| {
-                    if (self.info.api_group.len == 0) {
-                        base_path = try std.fmt.allocPrint(allocator, "/api/{s}/namespaces/{s}/{s}", .{
-                            self.info.api_version,
-                            ns,
-                            self.info.plural,
-                        });
-                    } else {
-                        base_path = try std.fmt.allocPrint(allocator, "/apis/{s}/{s}/namespaces/{s}/{s}", .{
-                            self.info.api_group,
-                            self.info.api_version,
-                            ns,
-                            self.info.plural,
-                        });
-                    }
-                } else {
-                    // List across all namespaces
-                    if (self.info.api_group.len == 0) {
-                        base_path = try std.fmt.allocPrint(allocator, "/api/{s}/{s}", .{
-                            self.info.api_version,
-                            self.info.plural,
-                        });
-                    } else {
-                        base_path = try std.fmt.allocPrint(allocator, "/apis/{s}/{s}/{s}", .{
-                            self.info.api_group,
-                            self.info.api_version,
-                            self.info.plural,
-                        });
-                    }
-                }
-            } else {
-                // Cluster-scoped resource
-                if (self.info.api_group.len == 0) {
-                    base_path = try std.fmt.allocPrint(allocator, "/api/{s}/{s}", .{
-                        self.info.api_version,
-                        self.info.plural,
-                    });
-                } else {
-                    base_path = try std.fmt.allocPrint(allocator, "/apis/{s}/{s}/{s}", .{
-                        self.info.api_group,
-                        self.info.api_version,
-                        self.info.plural,
-                    });
-                }
-            }
-
-            // Check if we need query parameters
-            const has_params = options.labelSelector != null or
-                options.fieldSelector != null or
-                options.limit != null or
-                options.continueToken != null;
-
-            if (!has_params) {
-                return base_path;
-            }
-
-            // Build query string
-            defer allocator.free(base_path);
-
-            var query_parts: [4][]const u8 = undefined;
-            var query_count: usize = 0;
-
-            var label_sel: ?[]const u8 = null;
-            var field_sel: ?[]const u8 = null;
-            var limit_str: ?[]const u8 = null;
-            var continue_str: ?[]const u8 = null;
-
-            if (options.labelSelector) |selector| {
-                label_sel = try std.fmt.allocPrint(allocator, "labelSelector={s}", .{selector});
-                query_parts[query_count] = label_sel.?;
-                query_count += 1;
-            }
-            errdefer if (label_sel) |s| allocator.free(s);
-
-            if (options.fieldSelector) |selector| {
-                field_sel = try std.fmt.allocPrint(allocator, "fieldSelector={s}", .{selector});
-                query_parts[query_count] = field_sel.?;
-                query_count += 1;
-            }
-            errdefer if (field_sel) |s| allocator.free(s);
-
-            if (options.limit) |limit| {
-                limit_str = try std.fmt.allocPrint(allocator, "limit={d}", .{limit});
-                query_parts[query_count] = limit_str.?;
-                query_count += 1;
-            }
-            errdefer if (limit_str) |s| allocator.free(s);
-
-            if (options.continueToken) |token| {
-                continue_str = try std.fmt.allocPrint(allocator, "continue={s}", .{token});
-                query_parts[query_count] = continue_str.?;
-                query_count += 1;
-            }
-            errdefer if (continue_str) |s| allocator.free(s);
-
-            // Join with &
-            const query = try std.mem.join(allocator, "&", query_parts[0..query_count]);
-            defer allocator.free(query);
-
-            // Free individual parts
-            if (label_sel) |s| allocator.free(s);
-            if (field_sel) |s| allocator.free(s);
-            if (limit_str) |s| allocator.free(s);
-            if (continue_str) |s| allocator.free(s);
-
-            return try std.fmt.allocPrint(allocator, "{s}?{s}", .{ base_path, query });
+        /// CREATE recources
+        pub fn pathForCreate(self: Self, options: CreateOptions) ![]const u8 {
+            return self.info.buildPath(self.client.allocator, self.namespace, .{ .create = options });
         }
     };
 }
