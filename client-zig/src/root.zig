@@ -81,6 +81,7 @@ pub const Job = proto.Job;
 pub const JobList = proto.JobList;
 pub const ObjectMeta = proto.ObjectMeta;
 pub const ListMeta = proto.ListMeta;
+pub const Status = proto.Status;
 
 // Resource info definitions for core v1 resources
 pub const resource_info = struct {

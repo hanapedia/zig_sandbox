@@ -53,6 +53,12 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("Failed to list services: {}\n", .{err});
     };
 
+    // Test ConfigMap CRUD operations
+    std.debug.print("\n--- ConfigMap CRUD in '{s}' namespace ---\n", .{namespace});
+    testConfigMapCrud(&client, allocator, namespace) catch |err| {
+        std.debug.print("Failed ConfigMap CRUD test: {}\n", .{err});
+    };
+
     // Watch pods using protobuf encoding
     std.debug.print("\n--- Watching Pods in '{s}' namespace (protobuf encoding) ---\n", .{namespace});
     watchPods(&client, namespace) catch |err| {
@@ -192,6 +198,92 @@ fn watchPods(client: *k8s.Client, namespace: []const u8) !void {
             break;
         }
     }
+}
+
+/// Test ConfigMap create, update, and delete operations.
+fn testConfigMapCrud(client: *k8s.Client, allocator: std.mem.Allocator, namespace: []const u8) !void {
+    const cm_name = "zig-client-test";
+
+    // 1. Create a ConfigMap
+    std.debug.print("  Creating ConfigMap '{s}'...\n", .{cm_name});
+    var created = try createConfigMap(client, allocator, namespace, cm_name);
+    defer created.deinit();
+    std.debug.print("  Created: {s} (rv={s})\n", .{
+        if (created.value.metadata) |m| m.name orelse "?" else "?",
+        if (created.value.metadata) |m| m.resourceVersion orelse "?" else "?",
+    });
+
+    // 2. Update the ConfigMap
+    std.debug.print("  Updating ConfigMap '{s}'...\n", .{cm_name});
+    var updated = try updateConfigMap(client, allocator, namespace, cm_name, created.value);
+    defer updated.deinit();
+    std.debug.print("  Updated: {s} (rv={s})\n", .{
+        if (updated.value.metadata) |m| m.name orelse "?" else "?",
+        if (updated.value.metadata) |m| m.resourceVersion orelse "?" else "?",
+    });
+
+    // 3. Delete the ConfigMap
+    std.debug.print("  Deleting ConfigMap '{s}'...\n", .{cm_name});
+    try deleteConfigMap(client, namespace, cm_name);
+    std.debug.print("  Deleted successfully\n", .{});
+}
+
+/// Create a new ConfigMap with test data.
+fn createConfigMap(
+    client: *k8s.Client,
+    allocator: std.mem.Allocator,
+    namespace: []const u8,
+    name: []const u8,
+) !k8s.Client.ProtoResult(k8s.ConfigMap) {
+    // Build the ConfigMap
+    var cm = k8s.ConfigMap{
+        .metadata = k8s.ObjectMeta{
+            .name = name,
+            .namespace = namespace,
+        },
+    };
+
+    // Add data entries
+    try cm.data.append(allocator, .{ .key = "key1", .value = "value1" });
+    try cm.data.append(allocator, .{ .key = "key2", .value = "value2" });
+    defer cm.data.deinit(allocator);
+
+    return k8s.configMaps(client, namespace).create(cm, .{});
+}
+
+/// Update a ConfigMap with new data.
+fn updateConfigMap(
+    client: *k8s.Client,
+    allocator: std.mem.Allocator,
+    namespace: []const u8,
+    name: []const u8,
+    existing: k8s.ConfigMap,
+) !k8s.Client.ProtoResult(k8s.ConfigMap) {
+    // Copy existing and modify
+    var cm = k8s.ConfigMap{
+        .metadata = k8s.ObjectMeta{
+            .name = name,
+            .namespace = namespace,
+            // Must include resourceVersion for update
+            .resourceVersion = if (existing.metadata) |m| m.resourceVersion else null,
+        },
+    };
+
+    // Update data entries
+    try cm.data.append(allocator, .{ .key = "key1", .value = "updated-value1" });
+    try cm.data.append(allocator, .{ .key = "key3", .value = "new-value3" });
+    defer cm.data.deinit(allocator);
+
+    return k8s.configMaps(client, namespace).update(name, cm, .{});
+}
+
+/// Delete a ConfigMap by name.
+fn deleteConfigMap(client: *k8s.Client, namespace: []const u8, name: []const u8) !void {
+    var result = try k8s.configMaps(client, namespace).delete(name, .{});
+    defer result.deinit();
+    // result.value is a Status object
+    const status = if (result.value.status) |s| s else "Success";
+    std.debug.print("    Status: {s}\n", .{status});
 }
 
 /// Watch pods using the low-level WatchStream API.

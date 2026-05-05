@@ -3,6 +3,7 @@
 const std = @import("std");
 const watcher = @import("watch.zig");
 const Client = @import("../client/Client.zig").Client;
+const Status = @import("../proto/mod.zig").Status;
 
 /// ResourceInfo describes the API path information for a Kubernetes resource.
 pub const ResourceInfo = struct {
@@ -53,6 +54,7 @@ pub const ResourceInfo = struct {
 const QueryParams = union(enum) {
     list: ListOptions,
     delete: DeleteOptions,
+    deleteCollection: DeleteCollectionOptions,
     watch: watcher.WatchOptions,
     create: CreateOptions,
     update: UpdateOptions,
@@ -198,7 +200,78 @@ pub fn TypedClient(comptime T: type, comptime L: type) type {
             return watcher.Watcher(T).init(self.client, self.namespace, self.info, options);
         }
 
-        /// GET single resourcs
+        /// Create a new resource.
+        pub fn create(self: Self, resource: T, options: CreateOptions) !Client.ProtoResult(T) {
+            const path = try self.pathForCreate(options);
+            defer self.client.allocator.free(path);
+
+            return self.client.post(T, path, resource);
+        }
+
+        /// Update (replace) an existing resource.
+        /// The resource must have metadata.resourceVersion set.
+        pub fn update(self: Self, name: []const u8, resource: T, options: UpdateOptions) !Client.ProtoResult(T) {
+            const path = try self.pathForUpdate(name, options);
+            defer self.client.allocator.free(path);
+
+            return self.client.put(T, path, resource);
+        }
+
+        /// Delete a resource by name.
+        /// Returns Status on success.
+        pub fn delete(self: Self, name: []const u8, options: DeleteOptions) !Client.ProtoResult(Status) {
+            const path = try self.pathForDelete(name, options);
+            defer self.client.allocator.free(path);
+
+            return self.client.deleteResource(Status, path);
+        }
+
+        /// Delete multiple resources matching the criteria.
+        /// Returns Status on success.
+        pub fn deleteCollection(self: Self, options: DeleteCollectionOptions) !Client.ProtoResult(Status) {
+            const path = try self.pathForDeleteCollection(options);
+            defer self.client.allocator.free(path);
+
+            return self.client.deleteResource(Status, path);
+        }
+
+        /// Patch a resource using strategic merge patch (default).
+        pub fn patchStrategicMerge(self: Self, name: []const u8, patch_json: []const u8, options: PatchOptions) !Client.ProtoResult(T) {
+            const path = try self.pathForPatch(name, options);
+            defer self.client.allocator.free(path);
+
+            return self.client.patch(T, path, patch_json, .strategic_merge_patch);
+        }
+
+        /// Patch a resource using JSON patch (RFC 6902).
+        pub fn patchJson(self: Self, name: []const u8, patch_json: []const u8, options: PatchOptions) !Client.ProtoResult(T) {
+            const path = try self.pathForPatch(name, options);
+            defer self.client.allocator.free(path);
+
+            return self.client.patch(T, path, patch_json, .json_patch);
+        }
+
+        /// Patch a resource using merge patch (RFC 7386).
+        pub fn patchMerge(self: Self, name: []const u8, patch_json: []const u8, options: PatchOptions) !Client.ProtoResult(T) {
+            const path = try self.pathForPatch(name, options);
+            defer self.client.allocator.free(path);
+
+            return self.client.patch(T, path, patch_json, .merge_patch);
+        }
+
+        /// Server-side apply a resource.
+        pub fn apply(self: Self, name: []const u8, patch_yaml: []const u8, options: PatchOptions) !Client.ProtoResult(T) {
+            const path = try self.pathForPatch(name, options);
+            defer self.client.allocator.free(path);
+
+            return self.client.patch(T, path, patch_yaml, .apply_patch);
+        }
+
+        // ====================================================================
+        // Path builders
+        // ====================================================================
+
+        /// GET single resource
         pub fn pathForGet(self: Self, name: []const u8) ![]const u8 {
             return self.info.buildPath(self.client.allocator, self.namespace, name, null);
         }
@@ -213,9 +286,29 @@ pub fn TypedClient(comptime T: type, comptime L: type) type {
             return self.info.buildPath(self.client.allocator, self.namespace, null, .{ .watch = options });
         }
 
-        /// CREATE recources
+        /// CREATE resource
         pub fn pathForCreate(self: Self, options: CreateOptions) ![]const u8 {
-            return self.info.buildPath(self.client.allocator, self.namespace, .{ .create = options });
+            return self.info.buildPath(self.client.allocator, self.namespace, null, .{ .create = options });
+        }
+
+        /// UPDATE resource
+        pub fn pathForUpdate(self: Self, name: []const u8, options: UpdateOptions) ![]const u8 {
+            return self.info.buildPath(self.client.allocator, self.namespace, name, .{ .update = options });
+        }
+
+        /// DELETE single resource
+        pub fn pathForDelete(self: Self, name: []const u8, options: DeleteOptions) ![]const u8 {
+            return self.info.buildPath(self.client.allocator, self.namespace, name, .{ .delete = options });
+        }
+
+        /// DELETE collection
+        pub fn pathForDeleteCollection(self: Self, options: DeleteCollectionOptions) ![]const u8 {
+            return self.info.buildPath(self.client.allocator, self.namespace, null, .{ .deleteCollection = options });
+        }
+
+        /// PATCH resource
+        pub fn pathForPatch(self: Self, name: []const u8, options: PatchOptions) ![]const u8 {
+            return self.info.buildPath(self.client.allocator, self.namespace, name, .{ .patch = options });
         }
     };
 }

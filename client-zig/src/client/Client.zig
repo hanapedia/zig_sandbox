@@ -8,7 +8,7 @@ const runtime = @import("../proto/k8s/io/apimachinery/pkg/runtime.pb.zig");
 /// Kubernetes protobuf magic bytes
 const K8S_PROTOBUF_MAGIC = "k8s\x00";
 
-/// Content types
+/// Content types for Accept header
 pub const ContentType = enum {
     json,
     protobuf,
@@ -17,6 +17,27 @@ pub const ContentType = enum {
         return switch (self) {
             .json => "application/json",
             .protobuf => "application/vnd.kubernetes.protobuf",
+        };
+    }
+};
+
+/// Content types for request body (Content-Type header)
+pub const RequestContentType = enum {
+    json,
+    protobuf,
+    strategic_merge_patch,
+    json_patch,
+    merge_patch,
+    apply_patch,
+
+    pub fn header(self: RequestContentType) []const u8 {
+        return switch (self) {
+            .json => "application/json",
+            .protobuf => "application/vnd.kubernetes.protobuf",
+            .strategic_merge_patch => "application/strategic-merge-patch+json",
+            .json_patch => "application/json-patch+json",
+            .merge_patch => "application/merge-patch+json",
+            .apply_patch => "application/apply-patch+yaml",
         };
     }
 };
@@ -102,26 +123,100 @@ pub const Client = struct {
 
     /// Perform a GET request and parse the response as protobuf into type T.
     pub fn get(self: *Client, comptime T: type, path: []const u8) !ProtoResult(T) {
-        const response = try self.requestWithContentType(.GET, path, null, .protobuf);
+        const response = try self.requestWithContentType(.GET, path, null, .json, .protobuf);
         errdefer self.allocator.free(response.body);
 
-        // Check status code
-        switch (response.status) {
+        try checkStatus(response.status);
+
+        // Parse protobuf response
+        return self.decodeK8sProtobuf(T, response.body);
+    }
+
+    /// Perform a POST request with protobuf body and parse the response.
+    pub fn post(self: *Client, comptime T: type, path: []const u8, resource: T) !ProtoResult(T) {
+        // Encode resource to k8s protobuf envelope
+        const body = try self.encodeK8sProtobuf(T, resource);
+        defer self.allocator.free(body);
+
+        const response = try self.requestWithContentType(.POST, path, body, .protobuf, .protobuf);
+        errdefer self.allocator.free(response.body);
+
+        try checkStatusForCreate(response.status);
+
+        return self.decodeK8sProtobuf(T, response.body);
+    }
+
+    /// Perform a PUT request with protobuf body and parse the response.
+    pub fn put(self: *Client, comptime T: type, path: []const u8, resource: T) !ProtoResult(T) {
+        // Encode resource to k8s protobuf envelope
+        const body = try self.encodeK8sProtobuf(T, resource);
+        defer self.allocator.free(body);
+
+        const response = try self.requestWithContentType(.PUT, path, body, .protobuf, .protobuf);
+        errdefer self.allocator.free(response.body);
+
+        try checkStatus(response.status);
+
+        return self.decodeK8sProtobuf(T, response.body);
+    }
+
+    /// Perform a DELETE request.
+    pub fn deleteResource(self: *Client, comptime T: type, path: []const u8) !ProtoResult(T) {
+        const response = try self.requestWithContentType(.DELETE, path, null, .json, .protobuf);
+        errdefer self.allocator.free(response.body);
+
+        try checkStatus(response.status);
+
+        return self.decodeK8sProtobuf(T, response.body);
+    }
+
+    /// Perform a PATCH request with JSON body and parse the response as protobuf.
+    /// Patch requests use JSON body but can accept protobuf response.
+    pub fn patch(
+        self: *Client,
+        comptime T: type,
+        path: []const u8,
+        patch_body: []const u8,
+        patch_type: RequestContentType,
+    ) !ProtoResult(T) {
+        const response = try self.requestWithContentType(.PATCH, path, patch_body, patch_type, .protobuf);
+        errdefer self.allocator.free(response.body);
+
+        try checkStatus(response.status);
+
+        return self.decodeK8sProtobuf(T, response.body);
+    }
+
+    fn checkStatus(status: std.http.Status) !void {
+        switch (status) {
             .ok => {},
             .unauthorized => return error.Unauthorized,
             .forbidden => return error.Forbidden,
             .not_found => return error.NotFound,
             .conflict => return error.Conflict,
             else => {
-                if (@intFromEnum(response.status) >= 500) {
+                if (@intFromEnum(status) >= 500) {
                     return error.ServerError;
                 }
                 return error.InvalidResponse;
             },
         }
+    }
 
-        // Parse protobuf response
-        return self.decodeK8sProtobuf(T, response.body);
+    fn checkStatusForCreate(status: std.http.Status) !void {
+        switch (status) {
+            .ok, .created => {},
+            .unauthorized => return error.Unauthorized,
+            .forbidden => return error.Forbidden,
+            .not_found => return error.NotFound,
+            .conflict => return error.Conflict,
+            else => {
+                if (@intFromEnum(status) >= 500) {
+                    return error.ServerError;
+                }
+                return error.InvalidResponse;
+            },
+        }
     }
 
     /// Result type for protobuf decoding - owns the response body memory
@@ -136,6 +231,38 @@ pub const Client = struct {
                 self._allocator.free(self._response_body);
             }
         };
+    }
+
+    /// Encode a resource into Kubernetes protobuf envelope format.
+    /// Format: k8s\x00 + protobuf(Unknown{typeMeta, raw})
+    fn encodeK8sProtobuf(self: *Client, comptime T: type, resource: T) ![]const u8 {
+        // First, encode the resource itself to get raw bytes
+        var raw_buf: [64 * 1024]u8 = undefined; // 64KB buffer for resource
+        var raw_writer: std.Io.Writer = .fixed(&raw_buf);
+        try T.encode(resource, &raw_writer, self.allocator);
+        const raw_data = raw_writer.buffered();
+
+        // Create Unknown wrapper with raw data
+        const unknown = runtime.Unknown{
+            .raw = raw_data,
+            // TypeMeta fields are optional - K8s will infer from the endpoint
+            .typeMeta = null,
+            .contentEncoding = null,
+            .contentType = null,
+        };
+
+        // Encode the Unknown wrapper
+        var unknown_buf: [64 * 1024]u8 = undefined;
+        var unknown_writer: std.Io.Writer = .fixed(&unknown_buf);
+        try runtime.Unknown.encode(unknown, &unknown_writer, self.allocator);
+        const unknown_data = unknown_writer.buffered();
+
+        // Build final envelope: k8s\x00 + unknown_data
+        var result = try self.allocator.alloc(u8, 4 + unknown_data.len);
+        @memcpy(result[0..4], K8S_PROTOBUF_MAGIC);
+        @memcpy(result[4..], unknown_data);
+
+        return result;
     }
 
     /// Decode Kubernetes protobuf envelope format.
@@ -222,16 +349,17 @@ pub const Client = struct {
         path: []const u8,
         body: ?[]const u8,
     ) !Response {
-        return self.requestWithContentType(method, path, body, .json);
+        return self.requestWithContentType(method, path, body, .json, .json);
     }
 
-    /// Perform a raw HTTP request using tls.zig with specified content type.
+    /// Perform a raw HTTP request using tls.zig with specified content types.
     pub fn requestWithContentType(
         self: *Client,
         method: std.http.Method,
         path: []const u8,
         body: ?[]const u8,
-        content_type: ContentType,
+        request_content_type: RequestContentType,
+        accept_type: ContentType,
     ) !Response {
         // Create HostName for connection
         const hostname = std.Io.net.HostName.init(self.host) catch |err| {
@@ -280,14 +408,16 @@ pub const Client = struct {
         defer self.allocator.free(content_length_header);
 
         const body_content = body orelse "";
-        const accept_header = content_type.acceptHeader();
+        const accept_header = accept_type.acceptHeader();
+        const content_type_header = request_content_type.header();
 
-        const request_str = try std.fmt.allocPrint(self.allocator, "{s} {s} HTTP/1.1\r\nHost: {s}\r\n{s}Accept: {s}\r\nContent-Type: application/json\r\n{s}Connection: close\r\n\r\n{s}", .{
+        const request_str = try std.fmt.allocPrint(self.allocator, "{s} {s} HTTP/1.1\r\nHost: {s}\r\n{s}Accept: {s}\r\nContent-Type: {s}\r\n{s}Connection: close\r\n\r\n{s}", .{
             @tagName(method),
             path_to_use,
             self.host,
             auth_header,
             accept_header,
+            content_type_header,
             content_length_header,
             body_content,
         });

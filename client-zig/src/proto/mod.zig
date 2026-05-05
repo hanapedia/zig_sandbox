@@ -57,6 +57,7 @@ pub const JobList = k8s.io.api.batch.v1.JobList;
 
 pub const ObjectMeta = k8s.io.apimachinery.pkg.apis.meta.v1.ObjectMeta;
 pub const ListMeta = k8s.io.apimachinery.pkg.apis.meta.v1.ListMeta;
+pub const Status = k8s.io.apimachinery.pkg.apis.meta.v1.Status;
 
 // Raw WatchEvent from apimachinery (used internally by watch.zig)
 pub const RawWatchEvent = k8s.io.apimachinery.pkg.apis.meta.v1.WatchEvent;
