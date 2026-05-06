@@ -7,8 +7,10 @@ A Kubernetes client library for Zig 0.16, inspired by [client-go](https://github
 - **Authentication**: Supports both kubeconfig file (`~/.kube/config`) and in-cluster ServiceAccount token
 - **TLS**: Uses [tls.zig](https://github.com/ianic/tls.zig) for reliable TLS connections
 - **Type-safe API**: Generic typed client for Kubernetes resources
-- **Protobuf types**: Generated from official Kubernetes proto definitions using [zig-protobuf](https://github.com/Arwalk/zig-protobuf)
-- **Read operations**: Get and List for core/v1 resources (Pods, Services, ConfigMaps, Secrets, Namespaces, Nodes)
+- **Protobuf encoding**: Uses protobuf for efficient wire format (both requests and responses)
+- **Full CRUD operations**: Get, List, Create, Update, Delete, and Patch
+- **Watch support**: Real-time streaming of resource changes with typed events
+- **Multiple patch types**: Strategic merge, JSON patch, merge patch, and server-side apply
 
 ## Requirements
 
@@ -35,7 +37,7 @@ zig build test
 
 ## Usage
 
-### Using kubeconfig (local development)
+### Basic Setup
 
 ```zig
 const std = @import("std");
@@ -57,20 +59,92 @@ pub fn main() !void {
         .ca_cert = config.ca_cert,
     });
     defer client.deinit();
-
-    // List pods in default namespace
-    const pods = try k8s.pods(&client, "default").list(.{});
-    defer pods.deinit();
-
-    // Note: protobuf types use .items.items to access the slice
-    for (pods.value.items.items) |pod| {
-        const name = if (pod.metadata) |m| m.name orelse "unknown" else "unknown";
-        std.debug.print("Pod: {s}\n", .{name});
-    }
 }
 ```
 
-### In-cluster usage
+### List Resources
+
+```zig
+// List pods in default namespace
+var pods = try k8s.pods(&client, "default").list(.{});
+defer pods.deinit();
+
+for (pods.value.items.items) |pod| {
+    const name = if (pod.metadata) |m| m.name orelse "unknown" else "unknown";
+    std.debug.print("Pod: {s}\n", .{name});
+}
+```
+
+### Create Resources
+
+```zig
+// Create a ConfigMap
+var cm = k8s.ConfigMap{
+    .metadata = k8s.ObjectMeta{
+        .name = "my-config",
+        .namespace = "default",
+    },
+};
+try cm.data.append(allocator, .{ .key = "key1", .value = "value1" });
+defer cm.data.deinit(allocator);
+
+var result = try k8s.configMaps(&client, "default").create(cm, .{});
+defer result.deinit();
+```
+
+### Update Resources
+
+```zig
+// Update requires resourceVersion for optimistic concurrency
+var cm = k8s.ConfigMap{
+    .metadata = k8s.ObjectMeta{
+        .name = "my-config",
+        .namespace = "default",
+        .resourceVersion = existing.metadata.?.resourceVersion,
+    },
+};
+try cm.data.append(allocator, .{ .key = "key1", .value = "updated-value" });
+defer cm.data.deinit(allocator);
+
+var result = try k8s.configMaps(&client, "default").update("my-config", cm, .{});
+defer result.deinit();
+```
+
+### Delete Resources
+
+```zig
+// Delete returns a Status object
+var result = try k8s.configMaps(&client, "default").delete("my-config", .{});
+defer result.deinit();
+```
+
+### Watch Resources
+
+```zig
+// Watch pods with the high-level Watcher API
+var watcher = try k8s.Watcher(k8s.Pod).init(
+    &client,
+    "default",
+    k8s.resource_info.pod,
+    .{}, // WatchOptions
+);
+defer watcher.deinit();
+
+while (try watcher.next()) |event_val| {
+    var event = event_val;
+    defer event.deinit();
+
+    const pod = event.object();
+    const name = if (pod.metadata) |m| m.name orelse "?" else "?";
+
+    std.debug.print("[{s}] {s}\n", .{
+        @tagName(event.event_type), // ADDED, MODIFIED, DELETED, BOOKMARK
+        name,
+    });
+}
+```
+
+### In-cluster Usage
 
 ```zig
 // Load in-cluster config (uses ServiceAccount token)
@@ -84,6 +158,19 @@ var client = try k8s.Client.init(io, allocator, .{
 });
 ```
 
+## Supported Resources
+
+| Resource | API Group | Operations |
+|----------|-----------|------------|
+| Pod | core/v1 | get, list, create, update, delete, patch, watch |
+| Service | core/v1 | get, list, create, update, delete, patch, watch |
+| ConfigMap | core/v1 | get, list, create, update, delete, patch, watch |
+| Secret | core/v1 | get, list, create, update, delete, patch, watch |
+| Namespace | core/v1 | get, list, create, update, delete, patch, watch |
+| Node | core/v1 | get, list, create, update, delete, patch, watch |
+| Deployment | apps/v1 | get, list, create, update, delete, patch, watch |
+| Job | batch/v1 | get, list, create, update, delete, patch, watch |
+
 ## Project Structure
 
 ```
@@ -95,9 +182,10 @@ client-zig/
 │   │   ├── kubeconfig.zig # Kubeconfig file parser
 │   │   └── in_cluster.zig # In-cluster auth (ServiceAccount)
 │   ├── client/
-│   │   └── Client.zig     # HTTP/TLS client using tls.zig
+│   │   └── Client.zig     # HTTP/TLS client with CRUD operations
 │   ├── api/
-│   │   └── typed.zig      # Generic typed client with ResourceInfo
+│   │   ├── typed.zig      # Generic typed client with ResourceInfo
+│   │   └── watch.zig      # Watch streaming (WatchStream, Watcher)
 │   └── proto/
 │       ├── mod.zig        # Module exports for proto types
 │       └── k8s/           # Generated protobuf types (gitignored)
@@ -149,26 +237,21 @@ task proto:symlinks   # Create import path symlinks
 task proto:generate   # Run protoc and zig fmt
 ```
 
-Generated types include `jsonDecode()` for parsing API responses:
+## Roadmap
 
-```zig
-const k8s = @import("client_zig");
+Planned features inspired by client-go:
 
-// Use generated proto types
-const Pod = k8s.proto.Pod;
-const pod = try Pod.jsonDecode(json_response, .{ .ignore_unknown_fields = true }, allocator);
-```
+- [ ] **Informer**: Cached watch with local store for efficient resource tracking
+- [ ] **Workqueue**: Rate-limited work queue for controller patterns
+- [ ] **SharedInformerFactory**: Shared informers to reduce API server load
+- [ ] **Lister**: Read from local cache instead of API server
+- [ ] **Retry with backoff**: Automatic retry with exponential backoff
+- [ ] **Leader election**: For high-availability controllers
 
 ## Dependencies
 
-- [tls.zig](https://github.com/ianic/tls.zig) - TLS implementation (workaround for std.http.Client TLS issues)
+- [tls.zig](https://github.com/ianic/tls.zig) - TLS implementation
 - [zig-protobuf](https://github.com/Arwalk/zig-protobuf) - Protobuf code generation and runtime
-
-## Limitations
-
-- Read-only operations (get, list) - no create/update/delete yet
-- Core v1, Apps v1, and Batch v1 resources via generated proto types
-- No watch/streaming support yet
 
 ## License
 
