@@ -1,0 +1,80 @@
+version: '3'
+
+vars:
+  LOCAL_AS: "65001"
+  LOCAL_ROUTER_ID: "10.0.0.1"
+  LISTEN_PORT: "179"   # non-privileged port; use 179 (with sudo) for real deployment
+  GOBGP_AS: "65002"
+  GOBGP_ROUTER_ID: "10.0.0.2"
+  GOBGP_CFG: "hack/gobgpd.toml"
+
+tasks:
+  default:
+    cmds: [{task: build}]
+
+  # ── Zig ──────────────────────────────────────────────────────────────────
+
+  build:
+    desc: Build the zigbgp binary
+    cmds:
+      - zig build
+
+  check:
+    desc: Type-check without producing a binary (fast feedback)
+    cmds:
+      - zig build check
+
+  test:
+    desc: Run unit tests
+    cmds:
+      - zig build test
+
+  run:
+    desc: "Run the demo speaker (AS={{.LOCAL_AS}}, listen port={{.LISTEN_PORT}})"
+    deps: [build]
+    cmds:
+      - sudo ./zig-out/bin/zigbgp
+
+  # ── GoBGP ────────────────────────────────────────────────────────────────
+
+  gobgp:start:
+    desc: "Start GoBGP daemon (AS={{.GOBGP_AS}}, peers with zigbgp on port {{.LISTEN_PORT}})"
+    cmds:
+      - mkdir -p hack
+      - |
+        cat > {{.GOBGP_CFG}} << 'EOF'
+        [global.config]
+          as = {{.GOBGP_AS}}
+          router-id = "{{.GOBGP_ROUTER_ID}}"
+          port = 1790
+
+        [[neighbors]]
+          [neighbors.config]
+            neighbor-address = "127.0.0.1"
+            peer-as = {{.LOCAL_AS}}
+          [neighbors.transport.config]
+            remote-port = {{.LISTEN_PORT}}
+        EOF
+      - gobgpd -f {{.GOBGP_CFG}} --log-level debug
+
+  gobgp:neighbors:
+    desc: Show GoBGP neighbor state
+    cmds:
+      - gobgp neighbor
+
+  gobgp:neighbor-detail:
+    desc: Show detailed state for the zigbgp peer
+    cmds:
+      - gobgp neighbor 127.0.0.1
+
+  gobgp:routes:
+    desc: Show GoBGP global RIB
+    cmds:
+      - gobgp global rib
+
+  gobgp:add-route:
+    desc: "Inject a test route into GoBGP (useful for testing UPDATE parsing)"
+    vars:
+      PREFIX: '{{default "10.1.0.0/24" .PREFIX}}'
+    cmds:
+      - gobgp global rib add {{.PREFIX}} nexthop {{.GOBGP_ROUTER_ID}}

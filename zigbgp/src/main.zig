@@ -28,5 +28,5 @@ pub fn main(init: std.process.Init) !void {
     });
 
     // Block until interrupted (Ctrl-C / SIGTERM).
-    try std.Io.sleep(init.io, std.Io.Duration.fromSeconds(3), .awake);
+    try std.Io.sleep(init.io, std.Io.Duration.fromSeconds(30), .awake);
 }
