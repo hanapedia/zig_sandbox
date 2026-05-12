@@ -27,7 +27,7 @@ pub const Header = struct {
     length: u16,
     msg_type: MessageType,
 
-    pub fn decode(buf: []u8) !Header {
+    pub fn decode(buf: []const u8) !Header {
         if (buf.len < HEADER_LEN) return error.BufferTooSmall;
 
         // parse marker
