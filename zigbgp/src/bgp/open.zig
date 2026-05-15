@@ -1,10 +1,25 @@
 const std = @import("std");
 
+pub const BGP_VERSION: u8 = 4;
 pub const AS_TRANS: u16 = 23456;
 pub const MIN_MSG_LEN: usize = 10;
+
+pub const OPT_PARAM_TL_LEN: usize = 2;
+pub const OPT_PARAM_CAP_TYPE: u8 = 2;
+
+pub const CAP_CODE_LENGTH_LEN: usize = 2;
+
+pub const CAP_4_OCTET_AS_CODE: u8 = 65;
+pub const CAP_ROUTE_REFRESH_CODE: u8 = 2;
+pub const CAP_MULTIPROTOCOL_CODE: u8 = 1;
+
 pub const CAP_4_OCTET_AS_LEN: usize = 4;
 pub const CAP_ROUTE_REFRESH_LEN: usize = 0;
 pub const CAP_MULTIPROTOCOL_LEN: usize = 4;
+
+pub const CAP_MULTIPROTOCOL_IPV4_AFI: u16 = 1;
+pub const CAP_MULTIPROTOCOL_IPV6_AFI: u16 = 2;
+pub const CAP_MULTIPROTOCOL_UNICAST_SAFI: u8 = 1;
 
 pub const Open = struct {
     version: u8, // protocol version
@@ -28,7 +43,7 @@ pub const Open = struct {
         if (buf.len < MIN_MSG_LEN) return error.BufferTooSmall;
         // parse version
         const version = buf[0];
-        if (version != 4) return error.UnsupportedVersion;
+        if (version != BGP_VERSION) return error.UnsupportedVersion;
 
         // parse and assign basic fields
         var open = Open{
@@ -48,35 +63,38 @@ pub const Open = struct {
         while (pos < opt_param_end) {
             const param_type = buf[pos];
             const param_len = buf[pos + 1];
-            pos += 2;
+            pos += OPT_PARAM_TL_LEN;
             if (pos + param_len > opt_param_end) return error.InvalidLength; // bound check
 
             // check if param is capabilities
-            if (param_type == 2) {
+            if (param_type == OPT_PARAM_CAP_TYPE) {
                 var cap_pos: usize = pos;
                 const cap_end: usize = pos + param_len;
 
                 while (cap_pos < cap_end) {
                     const cap_code = buf[cap_pos];
                     const cap_len = buf[cap_pos + 1];
-                    cap_pos += 2;
-                    if (cap_pos + cap_len > cap_end) return error.InvalidLength; // bound check
+                    cap_pos += CAP_CODE_LENGTH_LEN;
+                    if (cap_pos + cap_len > cap_end) {
+                        std.debug.print("cap_code: {d}, cap_pos: {d}, cap_len: {d}, cap_end: {d}\n", .{ cap_code, cap_pos, cap_pos, cap_end });
+                        return error.InvalidLength; // bound check
+                    }
 
                     switch (cap_code) {
-                        65 => { // 4-octet-AS
+                        CAP_4_OCTET_AS_CODE => { // 4-octet-AS
                             if (cap_len != CAP_4_OCTET_AS_LEN) return error.InvalidLength;
-                            open.four_octet_as = std.mem.readInt(u32, buf[cap_pos .. cap_pos + CAP_4_OCTET_AS_LEN], .big);
+                            open.four_octet_as = std.mem.readInt(u32, buf[cap_pos..][0..CAP_4_OCTET_AS_LEN], .big);
                         },
-                        2 => { // route reflesh
+                        CAP_ROUTE_REFRESH_CODE => { // route refresh
                             if (cap_len != CAP_ROUTE_REFRESH_LEN) return error.InvalidLength;
                             open.route_refresh = true;
                         },
-                        1 => { // multiprotocol
+                        CAP_MULTIPROTOCOL_CODE => { // multiprotocol
                             if (cap_len != CAP_MULTIPROTOCOL_LEN) return error.InvalidLength;
-                            const afi = std.mem.readInt(u16, buf[cap_pos .. cap_pos + 2], .big);
+                            const afi = std.mem.readInt(u16, buf[cap_pos..][0..2], .big);
                             const safi = buf[cap_pos + 3]; // cap_pos+2 is reserved byte
-                            if (afi == 1 and safi == 1) open.mp_ipv4_unicast = true;
-                            if (afi == 2 and safi == 1) open.mp_ipv6_unicast = true;
+                            if (afi == CAP_MULTIPROTOCOL_IPV4_AFI and safi == CAP_MULTIPROTOCOL_UNICAST_SAFI) open.mp_ipv4_unicast = true;
+                            if (afi == CAP_MULTIPROTOCOL_IPV6_AFI and safi == CAP_MULTIPROTOCOL_UNICAST_SAFI) open.mp_ipv6_unicast = true;
                         },
                         //
                         else => {}, // skip unknown
@@ -89,57 +107,65 @@ pub const Open = struct {
 
         return open;
     }
-};
 
-// ── Implementation targets ────────────────────────────────────────────────────
-//
-// Make the tests below pass by implementing:
-//
-//   pub const AS_TRANS: u16 = 23456;  // placeholder AS when real AS > 65535 (RFC 6793)
-//
-//   pub const Open = struct {
-//       version:         u8,
-//       my_as:           u16,     // 2-byte wire value; may be AS_TRANS
-//       hold_time:       u16,
-//       bgp_id:          [4]u8,
-//       // parsed capabilities
-//       four_octet_as:   ?u32 = null,   // from capability code 65
-//       route_refresh:   bool = false,  // capability code 2
-//       mp_ipv4_unicast: bool = false,  // capability code 1, AFI=1 SAFI=1
-//       mp_ipv6_unicast: bool = false,  // capability code 1, AFI=2 SAFI=1
-//
-//       /// Returns the real AS number: four_octet_as if present, otherwise my_as.
-//       pub fn asNumber(self: Open) u32
-//
-//       /// Parse an OPEN message body (everything after the 19-byte BGP header).
-//       /// No allocation — capabilities map to fixed boolean/optional fields.
-//       pub fn decode(buf: []const u8) !Open
-//
-//       /// Write an OPEN message body into buf. Returns bytes written.
-//       /// Writes capability 65 if four_octet_as is set.
-//       /// Writes capability 2  if route_refresh is true.
-//       /// Writes capability 1  for each mp_ipv4_unicast / mp_ipv6_unicast set.
-//       pub fn encode(self: Open, buf: []u8) !usize
-//   };
-//
-// OPEN body wire layout (RFC 4271 §4.2), follows the 19-byte BGP header:
-//
-//   Version(1) | My-AS(2) | Hold-Time(2) | BGP-ID(4) | Opt-Parm-Len(1) | Opt-Params(N)
-//   minimum body: 10 bytes
-//
-// Optional parameters are TLV: type(1) | length(1) | value(N)
-//   Only type=2 (Capabilities) is used.
-//
-// Each capability inside: cap-code(1) | cap-len(1) | cap-data(N)
-//
-// Capabilities:
-//   code 1  Multiprotocol Extensions — AFI(2) + reserved(1) + SAFI(1)
-//   code 2  Route Refresh            — no data
-//   code 65 4-Octet AS Number        — ASN(4)
-//
-// Errors to define:
-//   error.BufferTooSmall      — body shorter than 10 bytes
-//   error.UnsupportedVersion  — version ≠ 4
+    pub fn encode(self: Open, buf: []u8) !usize {
+        if (buf.len < MIN_MSG_LEN) return error.BufferTooSmall;
+
+        // write version
+        buf[0] = BGP_VERSION;
+        // write as
+        std.mem.writeInt(u16, buf[1..3], self.my_as, .big);
+        // write hold_time
+        std.mem.writeInt(u16, buf[3..5], self.hold_time, .big);
+        // write bgp id
+        buf[5..9].* = self.bgp_id;
+        // calc opt-param length
+        var cap_len: usize = 0;
+        if (self.four_octet_as) |_| cap_len += CAP_CODE_LENGTH_LEN + CAP_4_OCTET_AS_LEN;
+        if (self.route_refresh) cap_len += CAP_CODE_LENGTH_LEN + CAP_ROUTE_REFRESH_LEN;
+        if (self.mp_ipv4_unicast) cap_len += CAP_CODE_LENGTH_LEN + CAP_MULTIPROTOCOL_LEN;
+        if (self.mp_ipv6_unicast) cap_len += CAP_CODE_LENGTH_LEN + CAP_MULTIPROTOCOL_LEN;
+        const opt_param_len = if (cap_len > 0) cap_len + 2 else 0;
+        buf[9] = @intCast(opt_param_len);
+        if (opt_param_len == 0) return MIN_MSG_LEN; // no cap
+
+        if (buf.len < MIN_MSG_LEN + opt_param_len) return error.BufferTooSmall;
+        var pos: usize = MIN_MSG_LEN;
+        // fill capabilities
+        buf[pos] = OPT_PARAM_CAP_TYPE; // type capabilities
+        buf[pos + 1] = @intCast(cap_len); // cap length
+        pos += OPT_PARAM_TL_LEN;
+
+        if (self.four_octet_as) |as| {
+            buf[pos] = CAP_4_OCTET_AS_CODE;
+            buf[pos + 1] = @intCast(CAP_4_OCTET_AS_LEN);
+            std.mem.writeInt(u32, buf[pos + CAP_CODE_LENGTH_LEN ..][0..CAP_4_OCTET_AS_LEN], as, .big);
+            pos += CAP_CODE_LENGTH_LEN + CAP_4_OCTET_AS_LEN;
+        }
+        if (self.route_refresh) {
+            buf[pos] = CAP_ROUTE_REFRESH_CODE;
+            buf[pos + 1] = @intCast(CAP_ROUTE_REFRESH_LEN);
+            pos += CAP_CODE_LENGTH_LEN + CAP_ROUTE_REFRESH_LEN;
+        }
+        if (self.mp_ipv4_unicast) {
+            buf[pos] = CAP_MULTIPROTOCOL_CODE;
+            buf[pos + 1] = @intCast(CAP_MULTIPROTOCOL_LEN);
+            std.mem.writeInt(u16, buf[pos + 2 ..][0..2], CAP_MULTIPROTOCOL_IPV4_AFI, .big);
+            buf[pos + 4] = 0; // reserved
+            buf[pos + 5] = CAP_MULTIPROTOCOL_UNICAST_SAFI;
+            pos += CAP_CODE_LENGTH_LEN + CAP_MULTIPROTOCOL_LEN;
+        }
+        if (self.mp_ipv6_unicast) {
+            buf[pos] = CAP_MULTIPROTOCOL_CODE;
+            buf[pos + 1] = @intCast(CAP_MULTIPROTOCOL_LEN);
+            std.mem.writeInt(u16, buf[pos + 2 ..][0..2], CAP_MULTIPROTOCOL_IPV6_AFI, .big);
+            buf[pos + 4] = 0; // reserved
+            buf[pos + 5] = CAP_MULTIPROTOCOL_UNICAST_SAFI;
+            pos += CAP_CODE_LENGTH_LEN + CAP_MULTIPROTOCOL_LEN;
+        }
+        return MIN_MSG_LEN + opt_param_len;
+    }
+};
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
