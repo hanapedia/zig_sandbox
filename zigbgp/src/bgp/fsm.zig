@@ -93,24 +93,24 @@ pub const FSM = struct {
 
     pub fn handleIdleEvents(self: *FSM, event: FSMEvent) FSMAction {
         switch (event) {
-            .manual_start => return self.setStateAndReturn(.connect, .{}),
+            .manual_start => return self.setStateAndReturnAction(.connect, .{}),
             else => return .{}, // ignore everything else
         }
     }
 
     pub fn handleConnectEvents(self: *FSM, event: FSMEvent) FSMAction {
         switch (event) {
-            .tcp_connection_confirmed => return self.setStateAndReturn(.open_sent, .{ .send_open = true }),
-            .tcp_connection_fails => return self.setStateAndReturn(.active, .{}),
-            .manual_stop => return self.setStateAndReturn(.idle, .{}),
+            .tcp_connection_confirmed => return self.setStateAndReturnAction(.open_sent, .{ .send_open = true }),
+            .tcp_connection_fails => return self.setStateAndReturnAction(.active, .{}),
+            .manual_stop => return self.setStateAndReturnAction(.idle, .{}),
             else => return .{},
         }
     }
 
     pub fn handleActiveEvents(self: *FSM, event: FSMEvent) FSMAction {
         switch (event) {
-            .tcp_connection_confirmed => return self.setStateAndReturn(.open_sent, .{ .send_open = true }),
-            .manual_stop => return self.setStateAndReturn(.idle, .{}),
+            .tcp_connection_confirmed => return self.setStateAndReturnAction(.open_sent, .{ .send_open = true }),
+            .manual_stop => return self.setStateAndReturnAction(.idle, .{}),
             else => return .{},
         }
     }
@@ -120,27 +120,27 @@ pub const FSM = struct {
             .open_received => |o| {
                 // validate their AS
                 if (self.remote_as) |expected| {
-                    if (o.asNumber() != expected) return self.setStateAndReturn(.idle, .{
+                    if (o.asNumber() != expected) return self.setStateAndReturnAction(.idle, .{
                         .close_connection = true,
                         .send_notification = OpenMsgBadPeerNotification(),
                     });
                 }
                 const negotiated: u16 = @min(self.hold_time, o.hold_time);
                 if (negotiated != 0 and negotiated < MIN_HOLD_TIME)
-                    return self.setStateAndReturn(.idle, .{
+                    return self.setStateAndReturnAction(.idle, .{
                         .close_connection = true,
                         .send_notification = OpenMsgUnacceptableHoldTimerNotification(),
                     });
                 // use negotiated hold timer
                 self.negotiated_hold_time = negotiated;
-                return self.setStateAndReturn(.open_confirm, .{ .send_keepalive = true, .negotiated_hold_time = negotiated });
+                return self.setStateAndReturnAction(.open_confirm, .{ .send_keepalive = true, .negotiated_hold_time = negotiated });
             },
-            .hold_timer_expired => return self.setStateAndReturn(.idle, .{
+            .hold_timer_expired => return self.setStateAndReturnAction(.idle, .{
                 .close_connection = true,
                 .send_notification = HoldTimerExpiredNotification(),
             }),
-            .tcp_connection_fails => return self.setStateAndReturn(.active, .{}),
-            .manual_stop => return self.setStateAndReturn(.idle, .{
+            .tcp_connection_fails => return self.setStateAndReturnAction(.active, .{}),
+            .manual_stop => return self.setStateAndReturnAction(.idle, .{
                 .close_connection = true,
                 .send_notification = CeaseAdminShutdownNotification(),
             }),
@@ -150,13 +150,13 @@ pub const FSM = struct {
 
     pub fn handleOpenConfirmEvents(self: *FSM, event: FSMEvent) FSMAction {
         switch (event) {
-            .keepalive_received => return self.setStateAndReturn(.established, .{}),
-            .hold_timer_expired => return self.setStateAndReturn(.idle, .{
+            .keepalive_received => return self.setStateAndReturnAction(.established, .{}),
+            .hold_timer_expired => return self.setStateAndReturnAction(.idle, .{
                 .close_connection = true,
                 .send_notification = HoldTimerExpiredNotification(),
             }),
-            .notification_received => return self.setStateAndReturn(.idle, .{}),
-            .manual_stop => return self.setStateAndReturn(.idle, .{
+            .notification_received => return self.setStateAndReturnAction(.idle, .{}),
+            .manual_stop => return self.setStateAndReturnAction(.idle, .{
                 .close_connection = true,
                 .send_notification = CeaseAdminShutdownNotification(),
             }),
@@ -167,15 +167,15 @@ pub const FSM = struct {
     pub fn handleEstablishedEvents(self: *FSM, event: FSMEvent) FSMAction {
         switch (event) {
             .keepalive_received, .update_received => {
-                const hold_time = if (self.negotiated_hold_time) |n| n else self.hold_time;
-                return self.setStateAndReturn(.established, .{ .negotiated_hold_time = hold_time });
+                const hold_time = self.negotiated_hold_time orelse self.hold_time;
+                return self.setStateAndReturnAction(.established, .{ .negotiated_hold_time = hold_time });
             },
-            .hold_timer_expired => return self.setStateAndReturn(.idle, .{
+            .hold_timer_expired => return self.setStateAndReturnAction(.idle, .{
                 .close_connection = true,
                 .send_notification = HoldTimerExpiredNotification(),
             }),
-            .notification_received => return self.setStateAndReturn(.idle, .{}),
-            .manual_stop => return self.setStateAndReturn(.idle, .{
+            .notification_received => return self.setStateAndReturnAction(.idle, .{}),
+            .manual_stop => return self.setStateAndReturnAction(.idle, .{
                 .close_connection = true,
                 .send_notification = CeaseAdminShutdownNotification(),
             }),
@@ -183,7 +183,7 @@ pub const FSM = struct {
         }
     }
 
-    fn setStateAndReturn(self: *FSM, next: FSMState, ret: FSMAction) FSMAction {
+    fn setStateAndReturnAction(self: *FSM, next: FSMState, ret: FSMAction) FSMAction {
         self.state = next;
         return ret;
     }
