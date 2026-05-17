@@ -1,95 +1,33 @@
 const std = @import("std");
 
-// ── Wire format (RFC 4271 §4.3) ───────────────────────────────────────────────
-//
-// UPDATE body (everything after the 19-byte BGP header):
-//
-//   Withdrawn Routes Length (2)  — big-endian u16; bytes of withdrawn list
-//   Withdrawn Routes     (N)     — list of IPv4 prefixes being withdrawn
-//   Total Path Attr Len  (2)     — big-endian u16; bytes of path attr list
-//   Path Attributes      (M)     — TLV list
-//   NLRI                 (rest)  — list of IPv4 prefixes being announced
-//
-// Minimum body: 4 bytes (two zero-length fields, no NLRI).
-// A 4-byte all-zero UPDATE is the End-of-RIB marker (RFC 4724).
-//
-// ── IPv4 Prefix encoding (NLRI and withdrawn) ─────────────────────────────────
-//
-//   Length (1)   — prefix length in bits, 0-32
-//   Prefix (N)   — ceil(Length/8) bytes; only significant octets are present
-//
-//   Examples:
-//     0.0.0.0/0   → [0x00]                           (0 prefix bytes)
-//     10.0.0.0/8  → [0x08, 0x0A]                     (1 prefix byte)
-//     10.1.0.0/16 → [0x10, 0x0A, 0x01]               (2 prefix bytes)
-//     10.1.2.0/24 → [0x18, 0x0A, 0x01, 0x02]         (3 prefix bytes)
-//     10.1.2.3/32 → [0x20, 0x0A, 0x01, 0x02, 0x03]   (4 prefix bytes)
-//
-// ── Path attribute TLV ────────────────────────────────────────────────────────
-//
-//   Flags     (1)       — bit7=Optional, bit6=Transitive, bit5=Partial,
-//                         bit4=Extended-Length (ExtLen)
-//   Type Code (1)
-//   Length    (1 or 2)  — 2 bytes when ExtLen flag is set, 1 byte otherwise
-//   Value     (N)
-//
-//   Flags for well-known mandatory:   0x40 (Transitive, not Optional)
-//   Flags for optional non-transitive: 0x80 (Optional, not Transitive)
-//
-// Attributes to implement (by type code):
-//
-//   1  ORIGIN      flags=0x40  length=1  value: 0=IGP 1=EGP 2=INCOMPLETE
-//   2  AS_PATH     flags=0x40  variable  segments (see below)
-//   3  NEXT_HOP    flags=0x40  length=4  IPv4 address (4 bytes)
-//   4  MED         flags=0x80  length=4  u32 big-endian (optional, non-transitive)
-//   5  LOCAL_PREF  flags=0x40  length=4  u32 big-endian
-//
-//   Unknown attributes with the Optional flag set MUST be silently skipped
-//   (RFC 4271 §9): do not return an error for unrecognised type codes.
-//
-// ── AS_PATH segment format (4-byte AS, RFC 6793) ─────────────────────────────
-//
-//   Segment Type  (1)  — 1=AS_SET, 2=AS_SEQUENCE
-//   Segment Count (1)  — number of ASNs in this segment
-//   ASNs          (N×4) — 4-byte big-endian AS numbers
-//
-//   Example: AS_SEQUENCE [65001]
-//     [0x02, 0x01, 0x00, 0x00, 0xFD, 0xE9]  (6 bytes)
-//
-//   Full AS_PATH attribute carrying that segment:
-//     [0x40, 0x02, 0x06, 0x02, 0x01, 0x00, 0x00, 0xFD, 0xE9]  (9 bytes)
-//      flags type  len  ──── segment (6 bytes) ────────────────
-//
-// ── Errors ────────────────────────────────────────────────────────────────────
-//
-//   error.BufferTooSmall   — body shorter than 4 bytes (minimum two length fields)
-//   error.InvalidLength    — a length field overruns its enclosing region
-//   error.InvalidPrefixLen — prefix length > 32
-//   error.InvalidAttr      — malformed well-known attribute (wrong value length etc.)
-//
+pub const V4_PREFIX_LENGTH_LEN: usize = 1;
+pub const V4_PREFIX_LENGTH_MAX: u8 = 32;
 
-pub const Origin = enum(u8) { igp = 0, egp = 1, incomplete = 2, _ };
+pub const WITHDRAWN_LENGTH_LEN: usize = 2;
+pub const TOTAL_PATH_ATTR_LENGTH_LEN: usize = 2;
+pub const MIN_MSG_LEN: usize = WITHDRAWN_LENGTH_LEN + TOTAL_PATH_ATTR_LENGTH_LEN;
+
+// path attr TLV consts
+pub const PATH_ATTR_FLAGS_LEN: usize = 1;
+pub const PATH_ATTR_TYPE_CODE_LEN: usize = 1;
+pub const PATH_ATTR_LENGTH_LEN: usize = 1;
+pub const PATH_ATTR_EXT_LENGTH_LEN: usize = 2;
+
+pub const PATH_ATTR_ORIGIN_LEN: usize = 1;
+pub const PATH_ATTR_NEXT_HOP_LEN: usize = 4;
+pub const PATH_ATTR_MED_LEN: usize = 4;
+pub const PATH_ATTR_LOCAL_PREF_LEN: usize = 4;
+
+pub const PATH_ATTR_BASIC_FTL_LEN: usize = PATH_ATTR_FLAGS_LEN + PATH_ATTR_TYPE_CODE_LEN + PATH_ATTR_LENGTH_LEN;
+pub const PATH_ATTR_ORIGIN_TOTAL_LEN: usize = PATH_ATTR_BASIC_FTL_LEN + PATH_ATTR_ORIGIN_LEN;
+pub const PATH_ATTR_NEXT_HOP_TOTAL_LEN: usize = PATH_ATTR_BASIC_FTL_LEN + PATH_ATTR_NEXT_HOP_LEN;
+pub const PATH_ATTR_MED_TOTAL_LEN: usize = PATH_ATTR_BASIC_FTL_LEN + PATH_ATTR_MED_LEN;
+pub const PATH_ATTR_LOCAL_PREF_TOTAL_LEN: usize = PATH_ATTR_BASIC_FTL_LEN + PATH_ATTR_LOCAL_PREF_LEN;
 
 pub const AS_PATH_SEG_TYPE_LEN: usize = 1;
 pub const AS_PATH_SEG_COUNT_LEN: usize = 1;
 pub const MIN_AS_PATH_SEG_LEN: usize = AS_PATH_SEG_TYPE_LEN + AS_PATH_SEG_COUNT_LEN;
 pub const AS_PATH_ASN_LEN: usize = 4;
-
-/// AS_PATH segment types
-pub const AsSegType = enum(u8) { as_set = 1, as_sequence = 2, _ };
-
-pub const AsPath = struct {
-    sequence: []const u32 = &.{},
-    set: ?[]const u32 = null, // only for aggregated routes
-
-    pub fn deinit(self: AsPath, allocator: std.mem.Allocator) void {
-        allocator.free(self.sequence);
-        if (self.set) |s| allocator.free(s);
-    }
-};
-
-pub const V4_PREFIX_LENGTH_LEN: usize = 1;
-pub const V4_PREFIX_LENGTH_MAX: u8 = 32;
 
 pub const V4Prefix = struct {
     len: u8,
@@ -126,21 +64,6 @@ pub const V4Prefix = struct {
     }
 };
 
-pub const WITHDRAWN_LENGTH_LEN: usize = 2;
-pub const TOTAL_PATH_ATTR_LENGTH_LEN: usize = 2;
-pub const MIN_MSG_LEN: usize = WITHDRAWN_LENGTH_LEN + TOTAL_PATH_ATTR_LENGTH_LEN;
-
-// path attr TLV consts
-pub const PATH_ATTR_FLAGS_LEN: usize = 1;
-pub const PATH_ATTR_TYPE_CODE_LEN: usize = 1;
-pub const PATH_ATTR_LENGTH_LEN: usize = 1;
-pub const PATH_ATTR_EXT_LENGTH_LEN: usize = 2;
-
-pub const PATH_ATTR_ORIGIN_LEN: usize = 1;
-pub const PATH_ATTR_NEXT_HOP_LEN: usize = 4;
-pub const PATH_ATTR_MED_LEN: usize = 4;
-pub const PATH_ATTR_LOCAL_PREF_LEN: usize = 4;
-
 // path attr flags
 pub const AttrFlags = packed struct(u8) {
     _unused: u4 = 0, // bits 3-0
@@ -151,19 +74,47 @@ pub const AttrFlags = packed struct(u8) {
 };
 
 /// 0x40
-pub const WellKnownTransitive = AttrFlags{
-    .extended_len = false,
-    .partial = false,
-    .transitive = true,
-    .optional = false,
-};
+pub fn WellKnownTransitive() AttrFlags {
+    return AttrFlags{
+        .extended_len = false,
+        .partial = false,
+        .transitive = true,
+        .optional = false,
+    };
+}
 
 /// 0x80
-pub const OptionalNonTransitive = AttrFlags{
-    .extended_len = false,
-    .partial = false,
-    .transitive = false,
-    .optional = true,
+pub fn OptionalNonTransitive() AttrFlags {
+    return AttrFlags{
+        .extended_len = false,
+        .partial = false,
+        .transitive = false,
+        .optional = true,
+    };
+}
+
+pub const PathAttrTypeCode = enum(u8) {
+    origin = 1,
+    as_path = 2,
+    next_hop = 3,
+    med = 4,
+    local_pref = 5,
+    _,
+};
+
+pub const Origin = enum(u8) { igp = 0, egp = 1, incomplete = 2, _ };
+
+/// AS_PATH segment types
+pub const AsSegType = enum(u8) { as_set = 1, as_sequence = 2, _ };
+
+pub const AsPath = struct {
+    sequence: []const u32 = &.{},
+    set: ?[]const u32 = null, // only for aggregated routes
+
+    pub fn deinit(self: AsPath, allocator: std.mem.Allocator) void {
+        allocator.free(self.sequence);
+        if (self.set) |s| allocator.free(s);
+    }
 };
 
 pub const Update = struct {
@@ -211,7 +162,7 @@ pub const Update = struct {
             const flags: AttrFlags = @bitCast(buf[pos]);
             pos += PATH_ATTR_FLAGS_LEN;
             // type code
-            const type_code = buf[pos];
+            const type_code: PathAttrTypeCode = @enumFromInt(buf[pos]);
             pos += PATH_ATTR_TYPE_CODE_LEN;
             // length
             var path_attr_len: u16 = PATH_ATTR_LENGTH_LEN;
@@ -224,56 +175,56 @@ pub const Update = struct {
             }
             // value
             switch (type_code) {
-                1 => { // origin
+                .origin => { // origin
                     if (path_attr_len != PATH_ATTR_ORIGIN_LEN) return error.InvalidLength;
                     if (update.origin) |_| return error.DuplicatePathAttr;
                     update.origin = @enumFromInt(buf[pos]);
                     pos += path_attr_len;
                 },
-                2 => { // AS path
-                    if (path_attr_len < MIN_AS_PATH_SEG_LEN) return error.InvalidLength;
-                    const seg_type: AsSegType = @enumFromInt(buf[pos]);
-                    const seg_count: usize = @intCast(buf[pos + AS_PATH_SEG_TYPE_LEN]);
-                    pos += MIN_AS_PATH_SEG_LEN;
+                .as_path => { // AS path — inner loop over all segments in the attribute
+                    const as_path_end = pos + path_attr_len;
+                    while (pos < as_path_end) {
+                        if (as_path_end - pos < MIN_AS_PATH_SEG_LEN) return error.InvalidLength;
+                        const seg_type: AsSegType = @enumFromInt(buf[pos]);
+                        const seg_count: usize = @intCast(buf[pos + AS_PATH_SEG_TYPE_LEN]);
+                        pos += MIN_AS_PATH_SEG_LEN;
 
-                    // bound check
-                    if (path_attr_len < MIN_AS_PATH_SEG_LEN + seg_count * AS_PATH_ASN_LEN) return error.InvalidLength;
+                        // bound check: seg_count ASNs must fit within the attribute
+                        if (pos + seg_count * AS_PATH_ASN_LEN > as_path_end) return error.InvalidLength;
 
-                    // parse ASNs
-                    var seg_pos: usize = 0;
-                    var asns: std.ArrayList(u32) = .empty;
-                    while (seg_pos < seg_count * AS_PATH_ASN_LEN) {
-                        try asns.append(allocator, std.mem.readInt(u32, buf[pos + seg_pos ..][0..AS_PATH_ASN_LEN], .big));
-                        seg_pos += AS_PATH_ASN_LEN;
+                        // parse ASNs
+                        var asns: std.ArrayList(u32) = .empty;
+                        for (0..seg_count) |_| {
+                            try asns.append(allocator, std.mem.readInt(u32, buf[pos..][0..AS_PATH_ASN_LEN], .big));
+                            pos += AS_PATH_ASN_LEN;
+                        }
+
+                        switch (seg_type) {
+                            .as_sequence => {
+                                if (update.as_path.sequence.len > 0) return error.DuplicatePathAttr;
+                                update.as_path.sequence = try asns.toOwnedSlice(allocator);
+                            },
+                            .as_set => {
+                                if (update.as_path.set != null) return error.DuplicatePathAttr;
+                                update.as_path.set = try asns.toOwnedSlice(allocator);
+                            },
+                            else => pos += seg_count * AS_PATH_ASN_LEN, // skip unknown segment type
+                        }
                     }
-
-                    // check for dup attr
-                    switch (seg_type) {
-                        .as_sequence => {
-                            if (seg_type == .as_sequence and update.as_path.sequence.len > 0) return error.DuplicatePathAttr;
-                            update.as_path.sequence = try asns.toOwnedSlice(allocator);
-                        },
-                        .as_set => {
-                            if (seg_type == .as_set and update.as_path.set != null) return error.DuplicatePathAttr;
-                            update.as_path.set = try asns.toOwnedSlice(allocator);
-                        },
-                        else => {},
-                    }
-                    pos += seg_count * AS_PATH_ASN_LEN;
                 },
-                3 => { // next hop
+                .next_hop => { // next hop
                     if (path_attr_len != PATH_ATTR_NEXT_HOP_LEN) return error.InvalidLength;
                     if (update.next_hop) |_| return error.DuplicatePathAttr;
                     update.next_hop = buf[pos..][0..PATH_ATTR_NEXT_HOP_LEN].*;
                     pos += path_attr_len;
                 },
-                4 => { // MED
+                .med => { // MED
                     if (path_attr_len != PATH_ATTR_MED_LEN) return error.InvalidLength;
                     if (update.med) |_| return error.DuplicatePathAttr;
                     update.med = std.mem.readInt(u32, buf[pos..][0..PATH_ATTR_MED_LEN], .big);
                     pos += path_attr_len;
                 },
-                5 => { // local pref
+                .local_pref => { // local pref
                     if (path_attr_len != PATH_ATTR_LOCAL_PREF_LEN) return error.InvalidLength;
                     if (update.local_pref) |_| return error.DuplicatePathAttr;
                     update.local_pref = std.mem.readInt(u32, buf[pos..][0..PATH_ATTR_LOCAL_PREF_LEN], .big);
@@ -305,9 +256,138 @@ pub const Update = struct {
         self.as_path.deinit(allocator);
     }
 
-    // /// Encode an UPDATE body into buf. Returns bytes written.
-    // /// No allocation — reads directly from the struct fields.
-    // pub fn encode(self: Update, buf: []u8) !usize {}
+    /// Encode an UPDATE body into buf. Returns bytes written.
+    /// No allocation — reads directly from the struct fields.
+    pub fn encode(self: Update, buf: []u8) !usize {
+        if (buf.len < MIN_MSG_LEN) return error.BufferTooSmall;
+        var pos: usize = 0;
+        // withdrawn_len (2)
+        var withdrawn_total_len: usize = 0;
+        for (self.withdrawn) |prefix| {
+            withdrawn_total_len += V4_PREFIX_LENGTH_LEN + prefix.octetsNeeded();
+        }
+        std.mem.writeInt(u16, buf[pos..][0..WITHDRAWN_LENGTH_LEN], @intCast(withdrawn_total_len), .big);
+        pos += WITHDRAWN_LENGTH_LEN;
+
+        // withdrawn_prefix (N)
+        if (buf.len < pos + withdrawn_total_len) return error.BufferTooSmall;
+        for (self.withdrawn) |prefix| {
+            const withdrawn_written = try prefix.encode(buf[pos..]);
+            pos += withdrawn_written;
+        }
+
+        // total attr len (2)
+        if (buf.len < pos + TOTAL_PATH_ATTR_LENGTH_LEN) return error.BufferTooSmall;
+        var total_attr_len: usize = 0;
+        if (self.origin) |_| total_attr_len += PATH_ATTR_ORIGIN_TOTAL_LEN;
+        if (self.next_hop) |_| total_attr_len += PATH_ATTR_NEXT_HOP_TOTAL_LEN;
+        if (self.med) |_| total_attr_len += PATH_ATTR_MED_TOTAL_LEN;
+        if (self.local_pref) |_| total_attr_len += PATH_ATTR_LOCAL_PREF_TOTAL_LEN;
+        if (self.as_path.sequence.len > 0 or self.as_path.set != null) {
+            total_attr_len += PATH_ATTR_BASIC_FTL_LEN;
+            if (self.as_path.sequence.len > 0) total_attr_len += MIN_AS_PATH_SEG_LEN + AS_PATH_ASN_LEN * self.as_path.sequence.len;
+            if (self.as_path.set) |s| total_attr_len += MIN_AS_PATH_SEG_LEN + AS_PATH_ASN_LEN * s.len;
+        }
+        std.mem.writeInt(u16, buf[pos..][0..TOTAL_PATH_ATTR_LENGTH_LEN], @intCast(total_attr_len), .big);
+        pos += TOTAL_PATH_ATTR_LENGTH_LEN;
+
+        if (buf.len < pos + total_attr_len) return error.BufferTooSmall;
+
+        // path attr
+        if (self.origin) |o| {
+            buf[pos] = @bitCast(WellKnownTransitive()); // flags
+            pos += PATH_ATTR_FLAGS_LEN;
+            buf[pos] = @intFromEnum(PathAttrTypeCode.origin); // types code
+            pos += PATH_ATTR_TYPE_CODE_LEN;
+            buf[pos] = PATH_ATTR_ORIGIN_LEN; // len
+            pos += PATH_ATTR_LENGTH_LEN;
+            buf[pos] = @intFromEnum(o); // val
+            pos += PATH_ATTR_ORIGIN_LEN;
+        }
+
+        if (self.next_hop) |n| {
+            buf[pos] = @bitCast(WellKnownTransitive()); // flags
+            pos += PATH_ATTR_FLAGS_LEN;
+            buf[pos] = @intFromEnum(PathAttrTypeCode.next_hop); // types code
+            pos += PATH_ATTR_TYPE_CODE_LEN;
+            buf[pos] = PATH_ATTR_NEXT_HOP_LEN; // len
+            pos += PATH_ATTR_LENGTH_LEN;
+            @memcpy(buf[pos..][0..PATH_ATTR_NEXT_HOP_LEN], n[0..]); // val
+            pos += PATH_ATTR_NEXT_HOP_LEN;
+        }
+
+        if (self.med) |m| {
+            buf[pos] = @bitCast(OptionalNonTransitive()); // flags
+            pos += PATH_ATTR_FLAGS_LEN;
+            buf[pos] = @intFromEnum(PathAttrTypeCode.med); // types code
+            pos += PATH_ATTR_TYPE_CODE_LEN;
+            buf[pos] = PATH_ATTR_MED_LEN; // len
+            pos += PATH_ATTR_LENGTH_LEN;
+            std.mem.writeInt(u32, buf[pos..][0..PATH_ATTR_MED_LEN], m, .big); // val
+            pos += PATH_ATTR_MED_LEN;
+        }
+
+        if (self.local_pref) |l| {
+            buf[pos] = @bitCast(WellKnownTransitive()); // flags
+            pos += PATH_ATTR_FLAGS_LEN;
+            buf[pos] = @intFromEnum(PathAttrTypeCode.local_pref); // types code
+            pos += PATH_ATTR_TYPE_CODE_LEN;
+            buf[pos] = PATH_ATTR_LOCAL_PREF_LEN; // len
+            pos += PATH_ATTR_LENGTH_LEN;
+            std.mem.writeInt(u32, buf[pos..][0..PATH_ATTR_LOCAL_PREF_LEN], l, .big); // val
+            pos += PATH_ATTR_LOCAL_PREF_LEN;
+        }
+
+        if (self.as_path.sequence.len > 0 or self.as_path.set != null) {
+            buf[pos] = @bitCast(WellKnownTransitive()); // flags
+            pos += PATH_ATTR_FLAGS_LEN;
+            buf[pos] = @intFromEnum(PathAttrTypeCode.as_path); // types code
+            pos += PATH_ATTR_TYPE_CODE_LEN;
+
+            var as_path_value_len: usize = 0;
+            if (self.as_path.sequence.len > 0) as_path_value_len += AS_PATH_SEG_TYPE_LEN + AS_PATH_SEG_COUNT_LEN + self.as_path.sequence.len * AS_PATH_ASN_LEN;
+            if (self.as_path.set) |s| as_path_value_len += AS_PATH_SEG_TYPE_LEN + AS_PATH_SEG_COUNT_LEN + s.len * AS_PATH_ASN_LEN;
+            buf[pos] = @intCast(as_path_value_len);
+            pos += PATH_ATTR_LENGTH_LEN;
+
+            // sequence
+            if (self.as_path.sequence.len > 0) {
+                buf[pos] = @intFromEnum(AsSegType.as_sequence); // seg type
+                pos += AS_PATH_SEG_TYPE_LEN;
+                buf[pos] = @intCast(self.as_path.sequence.len); // count
+                pos += AS_PATH_SEG_COUNT_LEN;
+                for (self.as_path.sequence) |asn| {
+                    std.mem.writeInt(u32, buf[pos..][0..AS_PATH_ASN_LEN], asn, .big);
+                    pos += AS_PATH_ASN_LEN;
+                }
+            }
+
+            // set
+            if (self.as_path.set) |s| {
+                buf[pos] = @intFromEnum(AsSegType.as_set); // seg type
+                pos += AS_PATH_SEG_TYPE_LEN;
+                buf[pos] = @intCast(s.len); // count
+                pos += AS_PATH_SEG_COUNT_LEN;
+                for (s) |asn| {
+                    std.mem.writeInt(u32, buf[pos..][0..AS_PATH_ASN_LEN], asn, .big);
+                    pos += AS_PATH_ASN_LEN;
+                }
+            }
+        }
+
+        // nlri
+        if (self.nlri.len == 0) return pos;
+        var nlri_total_len: usize = 0;
+        for (self.nlri) |prefix| {
+            nlri_total_len += V4_PREFIX_LENGTH_LEN + prefix.octetsNeeded();
+        }
+        if (buf.len < pos + nlri_total_len) return error.BufferTooSmall;
+        for (self.nlri) |prefix| {
+            const nlri_written = try prefix.encode(buf[pos..]);
+            pos += nlri_written;
+        }
+        return pos;
+    }
 };
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -523,6 +603,44 @@ test "decode: AS_SEQUENCE with two ASNs" {
     try std.testing.expectEqual(@as(?[]const u32, null), u.as_path.set);
 }
 
+test "decode: AS_PATH with both AS_SEQUENCE and AS_SET segments" {
+    // Aggregated route: AS_SEQUENCE [65001] followed by AS_SET {65010, 65011}
+    // Both segments packed into one AS_PATH attribute.
+    //
+    // AS_SEQUENCE segment: type=2 count=1 AS=65001          = 6 bytes
+    // AS_SET segment:      type=1 count=2 AS=65010 AS=65011 = 10 bytes
+    // total segment data = 16 bytes → path_attr_len = 16
+    //
+    // AS_PATH attribute: flags=0x40 type=0x02 len=16 + 16 bytes = 19 bytes total
+    // total path attr len = 4 (ORIGIN) + 19 (AS_PATH) + 7 (NEXT_HOP) = 30 = 0x1E
+    const buf = [_]u8{
+        0x00, 0x00, // withdrawn_routes_len = 0
+        0x00, 0x1E, // total_path_attr_len = 30
+        0x40, 0x01, 0x01, 0x00, // ORIGIN = IGP
+        // AS_PATH (19 bytes): flags=0x40 type=0x02 len=16
+        0x40, 0x02, 0x10,
+        // segment 1: AS_SEQUENCE [65001]
+        0x02,
+        0x01, 0x00, 0x00, 0xFD,
+        0xE9,
+        // segment 2: AS_SET {65010, 65011}
+        0x01, 0x02, 0x00,
+        0x00, 0xFD, 0xF2, 0x00,
+        0x00, 0xFD, 0xF3,
+        0x40, 0x03, 0x04, 0x0A, 0x00, 0x00, 0x01, // NEXT_HOP = 10.0.0.1
+        // NLRI: 10.1.0.0/24
+        0x18, 0x0A, 0x01, 0x00,
+    };
+    const u = try Update.decode(&buf, std.testing.allocator);
+    defer u.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), u.as_path.sequence.len);
+    try std.testing.expectEqual(@as(u32, 65001), u.as_path.sequence[0]);
+    try std.testing.expectEqual(@as(usize, 2), u.as_path.set.?.len);
+    try std.testing.expectEqual(@as(u32, 65010), u.as_path.set.?[0]);
+    try std.testing.expectEqual(@as(u32, 65011), u.as_path.set.?[1]);
+}
+
 test "decode: unknown optional attribute is silently skipped" {
     // RFC 4271 §9: unknown optional attributes must be ignored.
     // Unknown attr: flags=0x80 (optional), type=0xFF, len=2, data=0xDEAD
@@ -565,38 +683,58 @@ test "decode: error when path_attr_len overruns buffer" {
     try std.testing.expectError(error.InvalidLength, Update.decode(&buf, std.testing.allocator));
 }
 
-// test "encode/decode round-trip" {
-//     const allocator = std.testing.allocator;
-//
-//     const sequence = [_]u32{65001};
-//     const original = Update{
-//         .withdrawn = &[_]V4Prefix{.{ .len = 8, .addr = .{ 10, 0, 0, 0 } }},
-//         .origin = .igp,
-//         .as_path = .{ .sequence = &sequence },
-//         .next_hop = .{ 10, 0, 0, 1 },
-//         .med = 200,
-//         .nlri = &[_]V4Prefix{.{ .len = 24, .addr = .{ 10, 1, 0, 0 } }},
-//     };
-//
-//     var buf: [256]u8 = undefined;
-//     const n = try original.encode(&buf);
-//
-//     const decoded = try Update.decode(buf[0..n], allocator);
-//     defer decoded.deinit(allocator);
-//
-//     try std.testing.expectEqual(@as(usize, 1), decoded.withdrawn.len);
-//     try std.testing.expectEqual(@as(u8, 8), decoded.withdrawn[0].len);
-//     try std.testing.expectEqualSlices(u8, &[4]u8{ 10, 0, 0, 0 }, &decoded.withdrawn[0].addr);
-//
-//     try std.testing.expectEqual(original.origin, decoded.origin);
-//     try std.testing.expectEqualSlices(u8, &original.next_hop.?, &decoded.next_hop.?);
-//     try std.testing.expectEqual(original.med, decoded.med);
-//
-//     try std.testing.expectEqual(@as(usize, 1), decoded.as_path.sequence.len);
-//     try std.testing.expectEqual(@as(u32, 65001), decoded.as_path.sequence[0]);
-//     try std.testing.expectEqual(@as(?[]const u32, null), decoded.as_path.set);
-//
-//     try std.testing.expectEqual(@as(usize, 1), decoded.nlri.len);
-//     try std.testing.expectEqual(@as(u8, 24), decoded.nlri[0].len);
-//     try std.testing.expectEqualSlices(u8, &[4]u8{ 10, 1, 0, 0 }, &decoded.nlri[0].addr);
-// }
+test "encode/decode round-trip: default route withdrawn exposes missing prefix len-byte bug" {
+    // 0.0.0.0/0 has octetsNeeded()=0. If withdrawn_total_len omits V4_PREFIX_LENGTH_LEN,
+    // it stays 0 and the wire length field is 0, causing decode to skip all withdrawn prefixes.
+    const allocator = std.testing.allocator;
+    const sequence = [_]u32{65001};
+    const original = Update{
+        .withdrawn = &[_]V4Prefix{.{ .len = 0, .addr = .{ 0, 0, 0, 0 } }},
+        .origin = .igp,
+        .as_path = .{ .sequence = &sequence },
+        .next_hop = .{ 10, 0, 0, 1 },
+        .nlri = &[_]V4Prefix{.{ .len = 24, .addr = .{ 10, 1, 0, 0 } }},
+    };
+    var buf: [256]u8 = undefined;
+    const n = try original.encode(&buf);
+    const decoded = try Update.decode(buf[0..n], allocator);
+    defer decoded.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), decoded.withdrawn.len);
+    try std.testing.expectEqual(@as(u8, 0), decoded.withdrawn[0].len);
+}
+
+test "encode/decode round-trip" {
+    const allocator = std.testing.allocator;
+
+    const sequence = [_]u32{65001};
+    const original = Update{
+        .withdrawn = &[_]V4Prefix{.{ .len = 8, .addr = .{ 10, 0, 0, 0 } }},
+        .origin = .igp,
+        .as_path = .{ .sequence = &sequence },
+        .next_hop = .{ 10, 0, 0, 1 },
+        .med = 200,
+        .nlri = &[_]V4Prefix{.{ .len = 24, .addr = .{ 10, 1, 0, 0 } }},
+    };
+
+    var buf: [256]u8 = undefined;
+    const n = try original.encode(&buf);
+
+    const decoded = try Update.decode(buf[0..n], allocator);
+    defer decoded.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), decoded.withdrawn.len);
+    try std.testing.expectEqual(@as(u8, 8), decoded.withdrawn[0].len);
+    try std.testing.expectEqualSlices(u8, &[4]u8{ 10, 0, 0, 0 }, &decoded.withdrawn[0].addr);
+
+    try std.testing.expectEqual(original.origin, decoded.origin);
+    try std.testing.expectEqualSlices(u8, &original.next_hop.?, &decoded.next_hop.?);
+    try std.testing.expectEqual(original.med, decoded.med);
+
+    try std.testing.expectEqual(@as(usize, 1), decoded.as_path.sequence.len);
+    try std.testing.expectEqual(@as(u32, 65001), decoded.as_path.sequence[0]);
+    try std.testing.expectEqual(@as(?[]const u32, null), decoded.as_path.set);
+
+    try std.testing.expectEqual(@as(usize, 1), decoded.nlri.len);
+    try std.testing.expectEqual(@as(u8, 24), decoded.nlri[0].len);
+    try std.testing.expectEqualSlices(u8, &[4]u8{ 10, 1, 0, 0 }, &decoded.nlri[0].addr);
+}
