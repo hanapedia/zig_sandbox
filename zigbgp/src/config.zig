@@ -7,7 +7,7 @@ pub const LocalConfig = struct {
 };
 
 pub const PeerConfig = struct {
-    address: std.net.Address,
+    address: std.Io.net.IpAddress,
     remote_as: u32,
     hold_time: u16 = 90,
     passive: bool = false,
