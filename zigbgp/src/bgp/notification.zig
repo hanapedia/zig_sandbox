@@ -19,16 +19,19 @@ pub const CeaseSubcode = enum(u8) { admin_shutdown = 2, peer_deconfigured = 3, a
 pub const Notification = struct {
     error_code: ErrorCode,
     error_subcode: u8,
-    /// points into the source buffer
     data: []const u8,
 
-    pub fn decode(buf: []const u8) !Notification {
+    pub fn decode(buf: []const u8, allocator: std.mem.Allocator) !Notification {
         if (buf.len < MIN_MSG_LEN) return error.BufferTooSmall;
         return Notification{
             .error_code = @enumFromInt(buf[0]),
             .error_subcode = buf[1],
-            .data = buf[MIN_MSG_LEN..],
+            .data = if (buf.len == MIN_MSG_LEN) &.{} else try allocator.dupe(u8, buf[MIN_MSG_LEN..]),
         };
+    }
+
+    pub fn deinit(self: Notification, allocator: std.mem.Allocator) void {
+        if (self.data.len > 0) allocator.free(self.data);
     }
 
     pub fn encode(self: Notification, buf: []u8) !usize {
@@ -47,7 +50,8 @@ test "decode: hold timer expired (no data)" {
         0x04, // error_code = 4 (hold timer expired)
         0x00, // error_subcode = 0
     };
-    const n = try Notification.decode(&buf);
+    const n = try Notification.decode(&buf, std.testing.allocator);
+    defer n.deinit(std.testing.allocator);
     try std.testing.expectEqual(ErrorCode.hold_timer_expired, n.error_code);
     try std.testing.expectEqual(@as(u8, 0), n.error_subcode);
     try std.testing.expectEqual(@as(usize, 0), n.data.len);
@@ -58,7 +62,8 @@ test "decode: cease / admin shutdown with no data" {
         0x06, // error_code = 6 (cease)
         0x02, // error_subcode = 2 (admin shutdown)
     };
-    const n = try Notification.decode(&buf);
+    const n = try Notification.decode(&buf, std.testing.allocator);
+    defer n.deinit(std.testing.allocator);
     try std.testing.expectEqual(ErrorCode.cease, n.error_code);
     try std.testing.expectEqual(@as(u8, 2), n.error_subcode);
 }
@@ -70,26 +75,29 @@ test "decode: notification with data bytes" {
         0x02, // error_subcode = 2 (bad peer AS)
         0xFD, 0xE9, // data = 65001 (the rejected AS)
     };
-    const n = try Notification.decode(&buf);
+    const n = try Notification.decode(&buf, std.testing.allocator);
+    defer n.deinit(std.testing.allocator);
     try std.testing.expectEqual(ErrorCode.open_message, n.error_code);
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0xFD, 0xE9 }, n.data);
 }
 
-test "decode: data is a slice into the source buffer (zero-copy)" {
+test "decode: data is copied (not a slice into source buffer)" {
     var buf = [_]u8{ 0x04, 0x00, 0xAB, 0xCD };
-    const n = try Notification.decode(&buf);
-    // data must point into buf, not a copy
-    try std.testing.expectEqual(@intFromPtr(buf[2..].ptr), @intFromPtr(n.data.ptr));
+    const n = try Notification.decode(&buf, std.testing.allocator);
+    defer n.deinit(std.testing.allocator);
+    // data is an owned copy — verify values not pointer equality
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0xAB, 0xCD }, n.data);
 }
 
 test "decode: error on buffer shorter than 2 bytes" {
     var buf = [_]u8{0x04};
-    try std.testing.expectError(error.BufferTooSmall, Notification.decode(&buf));
+    try std.testing.expectError(error.BufferTooSmall, Notification.decode(&buf, std.testing.allocator));
 }
 
 test "decode: unknown error code is preserved (non-exhaustive enum)" {
     var buf = [_]u8{ 0xFF, 0x00 };
-    const n = try Notification.decode(&buf);
+    const n = try Notification.decode(&buf, std.testing.allocator);
+    defer n.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(u8, 0xFF), @intFromEnum(n.error_code));
 }
 
@@ -131,7 +139,8 @@ test "encode/decode round-trip" {
     };
     var buf = [_]u8{0} ** 16;
     const written = try original.encode(&buf);
-    const decoded = try Notification.decode(buf[0..written]);
+    const decoded = try Notification.decode(buf[0..written], std.testing.allocator);
+    defer decoded.deinit(std.testing.allocator);
     try std.testing.expectEqual(original.error_code, decoded.error_code);
     try std.testing.expectEqual(original.error_subcode, decoded.error_subcode);
     try std.testing.expectEqualSlices(u8, original.data, decoded.data);
