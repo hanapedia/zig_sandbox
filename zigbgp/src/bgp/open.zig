@@ -1,8 +1,10 @@
 const std = @import("std");
+const config = @import("../config.zig");
 
 pub const BGP_VERSION: u8 = 4;
 pub const AS_TRANS: u16 = 23456;
 pub const MIN_MSG_LEN: usize = 10;
+pub const MAX_2_OCTET_AS: u16 = 65535;
 
 pub const OPT_PARAM_TL_LEN: usize = 2;
 pub const OPT_PARAM_CAP_TYPE: u8 = 2;
@@ -20,6 +22,17 @@ pub const CAP_MULTIPROTOCOL_LEN: usize = 4;
 pub const CAP_MULTIPROTOCOL_IPV4_AFI: u16 = 1;
 pub const CAP_MULTIPROTOCOL_IPV6_AFI: u16 = 2;
 pub const CAP_MULTIPROTOCOL_UNICAST_SAFI: u8 = 1;
+
+pub fn OpenFromConfig(local_cfg: config.LocalConfig, peer_cfg: config.PeerConfig) Open {
+    return Open{
+        .version = BGP_VERSION,
+        .my_as = if (local_cfg.as_number > MAX_2_OCTET_AS) AS_TRANS else @intCast(local_cfg.as_number),
+        .hold_time = peer_cfg.hold_time,
+        .bgp_id = local_cfg.router_id,
+        .four_octet_as = if (local_cfg.as_number <= MAX_2_OCTET_AS) local_cfg.as_number else null,
+        .mp_ipv4_unicast = true,
+    };
+}
 
 pub const Open = struct {
     version: u8, // protocol version

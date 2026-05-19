@@ -35,10 +35,20 @@ pub const MessageBody = union(enum) {
 pub const Peer = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
-    cfg: config.PeerConfig,
+    peer_cfg: config.PeerConfig,
+    local_cfg: config.LocalConfig,
     fsm: fsm.FSM,
+
+    // tcp conn
     conn: std.Io.net.Stream,
+    reader: std.Io.net.Stream.Reader,
+    writer: std.Io.net.Stream.Writer,
+
     thread: std.Thread,
+
+    // timers
+    hold_deadline: ?i64 = null,
+    keepalive_deadline: ?i64 = null,
 
     fn readMessage(self: Peer, reader: *std.Io.Reader) !struct { header: msg.Header, body: MessageBody } {
         var buf: [msg.MAX_MSG_LEN]u8 = undefined;
@@ -85,6 +95,58 @@ pub const Peer = struct {
         try header.encode(buf[0..]);
         try writer.writeAll(buf[0..header.length]);
         return header.length;
+    }
+
+    fn handleFSMAction(self: *Peer, action: fsm.FSMAction) !void {
+        if (action.negotiated_hold_time) |_| {
+            try self.resetHoldTimer();
+        }
+        if (action.send_keepalive) {
+            try self.writeMessage(self.writer, .keepalive);
+            self.resetKeepaliveTimer();
+        }
+        if (action.send_open) {
+            try self.writeMessage(self.writer, .{ .open = open.OpenFromConfig(self.local_cfg, self.peer_cfg) });
+        }
+        if (action.send_notification) |n| {
+            try self.writeMessage(self.writer, .{ .notification = n });
+        }
+        if (action.close_connection) {
+            try self.conn.shutdown(self.io, .both);
+        }
+    }
+
+    fn checkTimers(self: *Peer) !void {
+        const now = std.Io.Clock.now(self.io).toSeconds();
+        if (self.hold_deadline >= now) {
+            // should send notification and close connection
+            try self.handleFSMAction(self.fsm.handle(fsm.FSMEvent.hold_timer_expired));
+        }
+        if (self.keepalive_deadline >= now) {
+            // send keep alive and reset timer
+            try self.writeMessage(self.writer, .keepalive);
+            self.resetKeepaliveTimer();
+        }
+    }
+
+    /// resets the hold timer by adding negotiated hold time to now.
+    /// diables timer (sets to null) if negotiated hold time is null.
+    fn resetHoldTimer(self: *Peer) void {
+        if (self.fsm.negotiated_hold_time) |n| {
+            self.hold_deadline = std.Io.Clock.real.now(self.io).toSeconds() + n;
+        } else {
+            self.hold_deadline = null;
+        }
+    }
+
+    /// resets the keepalive timer by adding negotiated hold time / 3 to now.
+    /// diables timer (sets to null) if negotiated hold time is null.
+    fn resetKeepaliveTimer(self: *Peer) void {
+        if (self.fsm.negotiated_hold_time) |n| {
+            self.keepalive_deadline = std.Io.Clock.real.now(self.io).toSeconds() + @divTrunc(n, 3);
+        } else {
+            self.keepalive_deadline = null;
+        }
     }
 };
 
