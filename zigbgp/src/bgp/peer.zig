@@ -12,6 +12,24 @@ pub const MessageBody = union(enum) {
     update: update.Update,
     notification: notification.Notification,
     keepalive,
+
+    pub fn encode(self: MessageBody, buf: []u8) !usize {
+        return switch (self) {
+            .open => |o| o.encode(buf),
+            .keepalive => 0,
+            .update => |u| u.encode(buf),
+            .notification => |n| n.encode(buf),
+        };
+    }
+
+    pub fn toMessageTypeEnum(self: MessageBody) msg.MessageType {
+        return switch (self) {
+            .open => msg.MessageType.open,
+            .keepalive => msg.MessageType.keepalive,
+            .update => msg.MessageType.update,
+            .notification => msg.MessageType.notification,
+        };
+    }
 };
 
 pub const Peer = struct {
@@ -58,6 +76,15 @@ pub const Peer = struct {
             else => return error.InvalidMessageType,
         };
         return .{ .header = header, .body = body };
+    }
+
+    pub fn writeMessage(_: Peer, writer: *std.Io.Writer, body: MessageBody) !usize {
+        var buf: [msg.MAX_MSG_LEN]u8 = undefined;
+        const body_len = try body.encode(buf[msg.HEADER_LEN..]);
+        const header = msg.Header{ .length = @intCast(msg.HEADER_LEN + body_len), .msg_type = body.toMessageTypeEnum() };
+        try header.encode(buf[0..]);
+        try writer.writeAll(buf[0..header.length]);
+        return header.length;
     }
 };
 
@@ -163,4 +190,56 @@ test "readMessage: truncated stream returns error" {
     var reader = std.Io.Reader.fixed(&wire);
     const peer = testPeer(std.testing.allocator);
     try std.testing.expectError(error.EndOfStream, peer.readMessage(&reader));
+}
+
+// ── writeMessage / readMessage round-trip tests ───────────────────────────────
+
+test "round-trip: KEEPALIVE" {
+    var out: [msg.MAX_MSG_LEN]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&out);
+    const peer = testPeer(std.testing.allocator);
+    const written = try peer.writeMessage(&writer, .{ .keepalive = {} });
+    var reader = std.Io.Reader.fixed(out[0..written]);
+    const result = try peer.readMessage(&reader);
+    try std.testing.expectEqual(msg.MessageType.keepalive, result.header.msg_type);
+    try std.testing.expectEqual(@as(u16, msg.HEADER_LEN), result.header.length);
+}
+
+test "round-trip: OPEN" {
+    const original = open.Open{
+        .version = 4,
+        .my_as = 65001,
+        .hold_time = 90,
+        .bgp_id = .{ 10, 0, 0, 1 },
+    };
+    var out: [msg.MAX_MSG_LEN]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&out);
+    const peer = testPeer(std.testing.allocator);
+    const written = try peer.writeMessage(&writer, .{ .open = original });
+    var reader = std.Io.Reader.fixed(out[0..written]);
+    const result = try peer.readMessage(&reader);
+    try std.testing.expectEqual(msg.MessageType.open, result.header.msg_type);
+    const o = result.body.open;
+    try std.testing.expectEqual(original.my_as, o.my_as);
+    try std.testing.expectEqual(original.hold_time, o.hold_time);
+    try std.testing.expectEqual(original.bgp_id, o.bgp_id);
+}
+
+test "round-trip: NOTIFICATION" {
+    const original = notification.Notification{
+        .error_code = .hold_timer_expired,
+        .error_subcode = 0,
+        .data = &.{},
+    };
+    var out: [msg.MAX_MSG_LEN]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&out);
+    const peer = testPeer(std.testing.allocator);
+    const written = try peer.writeMessage(&writer, .{ .notification = original });
+    var reader = std.Io.Reader.fixed(out[0..written]);
+    const result = try peer.readMessage(&reader);
+    defer result.body.notification.deinit(std.testing.allocator);
+    try std.testing.expectEqual(msg.MessageType.notification, result.header.msg_type);
+    const n = result.body.notification;
+    try std.testing.expectEqual(original.error_code, n.error_code);
+    try std.testing.expectEqual(original.error_subcode, n.error_subcode);
 }
