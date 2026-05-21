@@ -7,6 +7,9 @@ const keepalive = @import("./keepalive.zig");
 const update = @import("./update.zig");
 const notification = @import("./notification.zig");
 
+const CONNECTION_TIMEOUT: i64 = 30;
+const RECONNECTION_TIMEOUT: i64 = 30;
+
 pub const MessageBody = union(enum) {
     open: open.Open,
     update: update.Update,
@@ -22,6 +25,14 @@ pub const MessageBody = union(enum) {
         };
     }
 
+    pub fn deinit(self: MessageBody, allocator: std.mem.Allocator) void {
+        switch (self) {
+            .update => |u| u.deinit(allocator),
+            .notification => |n| n.deinit(allocator),
+            else => return,
+        }
+    }
+
     pub fn toMessageTypeEnum(self: MessageBody) msg.MessageType {
         return switch (self) {
             .open => msg.MessageType.open,
@@ -35,20 +46,97 @@ pub const MessageBody = union(enum) {
 pub const Peer = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
+    // tcp conn
+    conn: ?std.Io.net.Stream = null,
+
     peer_cfg: config.PeerConfig,
     local_cfg: config.LocalConfig,
+
     fsm: fsm.FSM,
-
-    // tcp conn
-    conn: std.Io.net.Stream,
-    reader: std.Io.net.Stream.Reader,
-    writer: std.Io.net.Stream.Writer,
-
-    thread: std.Thread,
 
     // timers
     hold_deadline: ?i64 = null,
     keepalive_deadline: ?i64 = null,
+
+    thread: std.Thread,
+    running: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    // stop_fd: i32,
+
+    fn start(self: *Peer) !void {
+        self.running.store(true, .release);
+        self.thread = try std.Thread.spawn(.{}, Peer.run, .{self});
+    }
+
+    fn stop(self: *Peer) void {
+        self.running.store(false, .release);
+        if (self.conn) |c| c.close(self.io);
+        self.thread.join();
+    }
+
+    fn run(self: *Peer) void {
+        while (self.running.load(.acquire)) {
+            self.runSession() catch |err| {
+                std.debug.print("BGP session failed: {}\n", .{err});
+                self.fsm.handle(.tcp_connection_fails);
+                if (!self.running.load(.acquire)) return;
+                self.io.sleep(std.Io.Duration.fromSeconds(RECONNECTION_TIMEOUT), .awake);
+            };
+        }
+    }
+
+    fn runSession(self: *Peer) !void {
+        if (self.conn == null) {
+            self.conn = try self.peer_cfg.address.connect(self.io, .{ .mode = .stream, .timeout = std.Io.Duration.fromSeconds(CONNECTION_TIMEOUT) });
+        }
+        var reader_buf: [msg.MAX_MSG_LEN]u8 = undefined;
+        var reader = self.conn.?.reader(self.io, &reader_buf);
+        var writer_buf: [msg.MAX_MSG_LEN]u8 = undefined;
+        var writer = self.conn.?.writer(self.io, &writer_buf);
+        // tcp_connection_confirmed -> send open
+        try self.handleFSMAction(&writer, self.fsm.handle(.tcp_connection_confirmed));
+
+        var fds = [_]std.posix.pollfd{
+            .{ .fd = self.conn.?.socket.handle, .events = std.posix.POLL.IN, .revents = 0 },
+            // .{ .fd = self.stop_fd, .events = std.posix.POLL.IN, .revents = 0 },
+        };
+
+        while (self.running.load(.acquire)) {
+            const now = std.Io.Clock.real.now(self.io).toSeconds();
+            const deadline = self.nearestDeadline() orelse -1;
+
+            const timeout_ms: i64 = if (deadline == -1) -1 else @max(0, deadline - now) * 1000;
+
+            _ = try std.posix.poll(&fds, @intCast(timeout_ms));
+
+            // if (fds[1].revents & (std.posix.POLL.IN) != 0) {
+            //     try self.handleFSMAction(writer, self.fsm.handle(.manual_stop));
+            //     return;
+            // }
+
+            if (fds[0].revents & (std.posix.POLL.NVAL) != 0) {
+                return error.InvalidFd;
+            }
+
+            if (fds[0].revents & (std.posix.POLL.ERR | std.posix.POLL.HUP) != 0) {
+                return error.ConnecitonReset;
+            }
+
+            if (fds[0].revents & (std.posix.POLL.IN) != 0) {
+                const message = try self.readMessage(&reader);
+                const event: fsm.FSMEvent = switch (message.body) {
+                    .open => |o| .{ .open_received = o },
+                    .keepalive => .keepalive_received,
+                    .update => .update_received,
+                    .notification => |n| .{ .notification_received = n },
+                };
+                std.debug.print("recv message: {}\n", .{message.header.msg_type});
+                try self.handleFSMAction(&writer, self.fsm.handle(event));
+                // handle updates
+                message.body.deinit(self.allocator);
+            }
+            try self.checkTimers(&writer);
+        }
+    }
 
     fn readMessage(self: Peer, reader: *std.Io.Reader) !struct { header: msg.Header, body: MessageBody } {
         var buf: [msg.MAX_MSG_LEN]u8 = undefined;
@@ -97,35 +185,39 @@ pub const Peer = struct {
         return header.length;
     }
 
-    fn handleFSMAction(self: *Peer, action: fsm.FSMAction) !void {
+    fn handleFSMAction(self: *Peer, writer: *std.Io.Writer, action: fsm.FSMAction) !void {
         if (action.negotiated_hold_time) |_| {
-            try self.resetHoldTimer();
+            self.resetHoldTimer();
         }
         if (action.send_keepalive) {
-            try self.writeMessage(self.writer, .keepalive);
+            try self.writeMessage(writer, .keepalive);
             self.resetKeepaliveTimer();
         }
         if (action.send_open) {
-            try self.writeMessage(self.writer, .{ .open = open.OpenFromConfig(self.local_cfg, self.peer_cfg) });
+            try self.writeMessage(writer, .{ .open = openFromConfig(self.local_cfg, self.peer_cfg) });
         }
         if (action.send_notification) |n| {
-            try self.writeMessage(self.writer, .{ .notification = n });
+            try self.writeMessage(writer, .{ .notification = n });
         }
         if (action.close_connection) {
-            try self.conn.shutdown(self.io, .both);
+            if (self.conn) |c| try c.shutdown(self.io, .both);
         }
     }
 
-    fn checkTimers(self: *Peer) !void {
+    fn checkTimers(self: *Peer, writer: *std.Io.Writer) !void {
         const now = std.Io.Clock.now(self.io).toSeconds();
-        if (self.hold_deadline >= now) {
-            // should send notification and close connection
-            try self.handleFSMAction(self.fsm.handle(fsm.FSMEvent.hold_timer_expired));
+        if (self.hold_deadline) |h| {
+            if (now >= h) {
+                // should send notification and close connection
+                try self.handleFSMAction(writer, self.fsm.handle(fsm.FSMEvent.hold_timer_expired));
+            }
         }
-        if (self.keepalive_deadline >= now) {
-            // send keep alive and reset timer
-            try self.writeMessage(self.writer, .keepalive);
-            self.resetKeepaliveTimer();
+        if (self.keepalive_deadline) |k| {
+            if (now >= k) {
+                // send keep alive and reset timer
+                try self.writeMessage(writer, .keepalive);
+                self.resetKeepaliveTimer();
+            }
         }
     }
 
@@ -148,7 +240,25 @@ pub const Peer = struct {
             self.keepalive_deadline = null;
         }
     }
+
+    fn nearestDeadline(self: Peer) ?i64 {
+        if (self.keepalive_deadline == null and self.hold_deadline == null) return null;
+        if (self.keepalive_deadline == null) return self.hold_deadline;
+        if (self.hold_deadline == null) return self.keepalive_deadline;
+        return if (self.keepalive_deadline.? <= self.hold_deadline.?) self.keepalive_deadline else self.hold_deadline;
+    }
 };
+
+pub fn openFromConfig(local_cfg: config.LocalConfig, peer_cfg: config.PeerConfig) open.Open {
+    return open.Open{
+        .version = open.BGP_VERSION,
+        .my_as = if (local_cfg.as_number > open.MAX_2_OCTET_AS) open.AS_TRANS else @intCast(local_cfg.as_number),
+        .hold_time = peer_cfg.hold_time,
+        .bgp_id = local_cfg.router_id,
+        .four_octet_as = if (local_cfg.as_number > open.MAX_2_OCTET_AS) local_cfg.as_number else null,
+        .mp_ipv4_unicast = true,
+    };
+}
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 

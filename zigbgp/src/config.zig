@@ -7,6 +7,7 @@ pub const LocalConfig = struct {
 };
 
 pub const PeerConfig = struct {
+    /// must include port
     address: std.Io.net.IpAddress,
     remote_as: u32,
     hold_time: u16 = 90,

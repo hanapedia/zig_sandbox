@@ -23,17 +23,6 @@ pub const CAP_MULTIPROTOCOL_IPV4_AFI: u16 = 1;
 pub const CAP_MULTIPROTOCOL_IPV6_AFI: u16 = 2;
 pub const CAP_MULTIPROTOCOL_UNICAST_SAFI: u8 = 1;
 
-pub fn OpenFromConfig(local_cfg: config.LocalConfig, peer_cfg: config.PeerConfig) Open {
-    return Open{
-        .version = BGP_VERSION,
-        .my_as = if (local_cfg.as_number > MAX_2_OCTET_AS) AS_TRANS else @intCast(local_cfg.as_number),
-        .hold_time = peer_cfg.hold_time,
-        .bgp_id = local_cfg.router_id,
-        .four_octet_as = if (local_cfg.as_number <= MAX_2_OCTET_AS) local_cfg.as_number else null,
-        .mp_ipv4_unicast = true,
-    };
-}
-
 pub const Open = struct {
     version: u8, // protocol version
     my_as: u16,

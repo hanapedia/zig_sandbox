@@ -22,7 +22,7 @@ pub const FSMEvent = union(enum) {
     tcp_connection_confirmed,
     tcp_connection_fails,
     hold_timer_expired,
-    keepalive_timer_expired,
+    keepalive_timer_expired, // useless?
     open_received: open.Open,
     keepalive_received,
     update_received,
