@@ -81,14 +81,21 @@ pub const FSM = struct {
 
     /// Process one event. Mutates self.state. Never fails - invalid events are silently ignored.
     pub fn handle(self: *FSM, event: FSMEvent) FSMAction {
-        switch (self.state) {
-            .idle => return self.handleIdleEvents(event),
-            .connect => return self.handleConnectEvents(event),
-            .active => return self.handleActiveEvents(event),
-            .open_sent => return self.handleOpenSentEvents(event),
-            .open_confirm => return self.handleOpenConfirmEvents(event),
-            .established => return self.handleEstablishedEvents(event),
-        }
+        const prev = self.state;
+        const action = switch (self.state) {
+            .idle => self.handleIdleEvents(event),
+            .connect => self.handleConnectEvents(event),
+            .active => self.handleActiveEvents(event),
+            .open_sent => self.handleOpenSentEvents(event),
+            .open_confirm => self.handleOpenConfirmEvents(event),
+            .established => self.handleEstablishedEvents(event),
+        };
+        std.debug.print("FSM: {s} --[{s}]--> {s}\n", .{
+            @tagName(prev),
+            @tagName(event),
+            @tagName(self.state),
+        });
+        return action;
     }
 
     pub fn handleIdleEvents(self: *FSM, event: FSMEvent) FSMAction {

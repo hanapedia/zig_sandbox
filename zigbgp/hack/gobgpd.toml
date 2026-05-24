@@ -9,3 +9,4 @@
     peer-as = 65001
   [neighbors.transport.config]
     remote-port = 179
+    passive-mode = true

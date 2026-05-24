@@ -58,42 +58,45 @@ pub const Peer = struct {
     hold_deadline: ?i64 = null,
     keepalive_deadline: ?i64 = null,
 
-    thread: std.Thread,
+    thread: ?std.Thread = null,
     running: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     // stop_fd: i32,
 
-    fn start(self: *Peer) !void {
+    pub fn start(self: *Peer) !void {
+        if (self.running.load(.acquire)) return;
         self.running.store(true, .release);
+        _ = self.fsm.handle(.manual_start);
         self.thread = try std.Thread.spawn(.{}, Peer.run, .{self});
     }
 
-    fn stop(self: *Peer) void {
+    pub fn stop(self: *Peer) void {
+        if (!self.running.load(.acquire)) return;
         self.running.store(false, .release);
         if (self.conn) |c| c.close(self.io);
-        self.thread.join();
+        if (self.thread) |t| t.join();
     }
 
-    fn run(self: *Peer) void {
+    fn run(self: *Peer) !void {
         while (self.running.load(.acquire)) {
             self.runSession() catch |err| {
                 std.debug.print("BGP session failed: {}\n", .{err});
-                self.fsm.handle(.tcp_connection_fails);
+                _ = self.fsm.handle(.tcp_connection_fails);
                 if (!self.running.load(.acquire)) return;
-                self.io.sleep(std.Io.Duration.fromSeconds(RECONNECTION_TIMEOUT), .awake);
+                try self.io.sleep(std.Io.Duration.fromSeconds(RECONNECTION_TIMEOUT), .awake);
             };
         }
     }
 
     fn runSession(self: *Peer) !void {
         if (self.conn == null) {
-            self.conn = try self.peer_cfg.address.connect(self.io, .{ .mode = .stream, .timeout = std.Io.Duration.fromSeconds(CONNECTION_TIMEOUT) });
+            self.conn = try self.peer_cfg.address.connect(self.io, .{ .mode = .stream });
         }
         var reader_buf: [msg.MAX_MSG_LEN]u8 = undefined;
         var reader = self.conn.?.reader(self.io, &reader_buf);
         var writer_buf: [msg.MAX_MSG_LEN]u8 = undefined;
         var writer = self.conn.?.writer(self.io, &writer_buf);
         // tcp_connection_confirmed -> send open
-        try self.handleFSMAction(&writer, self.fsm.handle(.tcp_connection_confirmed));
+        try self.handleFSMAction(&writer.interface, self.fsm.handle(.tcp_connection_confirmed));
 
         var fds = [_]std.posix.pollfd{
             .{ .fd = self.conn.?.socket.handle, .events = std.posix.POLL.IN, .revents = 0 },
@@ -122,7 +125,7 @@ pub const Peer = struct {
             }
 
             if (fds[0].revents & (std.posix.POLL.IN) != 0) {
-                const message = try self.readMessage(&reader);
+                const message = try self.readMessage(&reader.interface);
                 const event: fsm.FSMEvent = switch (message.body) {
                     .open => |o| .{ .open_received = o },
                     .keepalive => .keepalive_received,
@@ -130,11 +133,11 @@ pub const Peer = struct {
                     .notification => |n| .{ .notification_received = n },
                 };
                 std.debug.print("recv message: {}\n", .{message.header.msg_type});
-                try self.handleFSMAction(&writer, self.fsm.handle(event));
+                try self.handleFSMAction(&writer.interface, self.fsm.handle(event));
                 // handle updates
                 message.body.deinit(self.allocator);
             }
-            try self.checkTimers(&writer);
+            try self.checkTimers(&writer.interface);
         }
     }
 
@@ -182,6 +185,7 @@ pub const Peer = struct {
         const header = msg.Header{ .length = @intCast(msg.HEADER_LEN + body_len), .msg_type = body.toMessageTypeEnum() };
         try header.encode(buf[0..]);
         try writer.writeAll(buf[0..header.length]);
+        try writer.flush();
         return header.length;
     }
 
@@ -190,14 +194,14 @@ pub const Peer = struct {
             self.resetHoldTimer();
         }
         if (action.send_keepalive) {
-            try self.writeMessage(writer, .keepalive);
+            _ = try self.writeMessage(writer, .keepalive);
             self.resetKeepaliveTimer();
         }
         if (action.send_open) {
-            try self.writeMessage(writer, .{ .open = openFromConfig(self.local_cfg, self.peer_cfg) });
+            _ = try self.writeMessage(writer, .{ .open = openFromConfig(self.local_cfg, self.peer_cfg) });
         }
         if (action.send_notification) |n| {
-            try self.writeMessage(writer, .{ .notification = n });
+            _ = try self.writeMessage(writer, .{ .notification = n });
         }
         if (action.close_connection) {
             if (self.conn) |c| try c.shutdown(self.io, .both);
@@ -205,7 +209,7 @@ pub const Peer = struct {
     }
 
     fn checkTimers(self: *Peer, writer: *std.Io.Writer) !void {
-        const now = std.Io.Clock.now(self.io).toSeconds();
+        const now = std.Io.Clock.real.now(self.io).toSeconds();
         if (self.hold_deadline) |h| {
             if (now >= h) {
                 // should send notification and close connection
@@ -215,7 +219,7 @@ pub const Peer = struct {
         if (self.keepalive_deadline) |k| {
             if (now >= k) {
                 // send keep alive and reset timer
-                try self.writeMessage(writer, .keepalive);
+                _ = try self.writeMessage(writer, .keepalive);
                 self.resetKeepaliveTimer();
             }
         }

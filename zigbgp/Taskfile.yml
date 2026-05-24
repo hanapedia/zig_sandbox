@@ -54,6 +54,7 @@ tasks:
             peer-as = {{.LOCAL_AS}}
           [neighbors.transport.config]
             remote-port = {{.LISTEN_PORT}}
+            passive-mode = true
         EOF
       - gobgpd -f {{.GOBGP_CFG}} --log-level debug
 

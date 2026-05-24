@@ -2,7 +2,7 @@ const std = @import("std");
 const bgp = @import("zigbgp");
 
 pub fn main(init: std.process.Init) !void {
-    const allocator = init.arena.allocator();
+    const allocator = init.gpa;
 
     var speaker = try bgp.Speaker.init(allocator, init.io, .{
         .as_number = 65001,
@@ -11,10 +11,10 @@ pub fn main(init: std.process.Init) !void {
     });
     defer speaker.deinit();
 
-    // TODO: speaker.addPeer(.{
-    //     .address   = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 179),
-    //     .remote_as = 65002,
-    // });
+    try speaker.addPeer(.{
+        .address = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 1790),
+        .remote_as = 65002,
+    });
 
     try speaker.start();
     defer speaker.stop();
