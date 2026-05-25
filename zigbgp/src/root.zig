@@ -15,6 +15,7 @@ pub const Speaker = @import("bgp/speaker.zig").Speaker;
 pub const LocalConfig = @import("config.zig").LocalConfig;
 pub const PeerConfig = @import("config.zig").PeerConfig;
 pub const Peer = @import("bgp/peer.zig").Peer;
+pub const Prefix = @import("bgp/prefix.zig").V4Prefix;
 test {
     _ = @import("bgp/message.zig");
     _ = @import("bgp/open.zig");

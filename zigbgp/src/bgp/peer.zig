@@ -6,6 +6,7 @@ const open = @import("./open.zig");
 const keepalive = @import("./keepalive.zig");
 const update = @import("./update.zig");
 const notification = @import("./notification.zig");
+const event = @import("event.zig");
 
 const CONNECTION_TIMEOUT: i64 = 30;
 const RECONNECTION_TIMEOUT: i64 = 30;
@@ -73,6 +74,30 @@ pub const Peer = struct {
 
     running: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     // stop_fd: i32,
+    route_event_queue: *event.RouteEventQueue,
+
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, peer_cfg: config.PeerConfig, local_cfg: config.LocalConfig) !Peer {
+        const req = try allocator.create(event.RouteEventQueue);
+        req.* = event.RouteEventQueue.init(allocator, io);
+
+        return .{
+            .allocator = allocator,
+            .io = io,
+            .peer_cfg = peer_cfg,
+            .local_cfg = local_cfg,
+            .fsm = fsm.FSM{
+                .local_as = local_cfg.as_number,
+                .router_id = local_cfg.router_id,
+                .hold_time = peer_cfg.hold_time,
+                .remote_as = peer_cfg.remote_as,
+            },
+            .route_event_queue = req,
+        };
+    }
+
+    pub fn deinit(self: *Peer) void {
+        self.route_event_queue.deinit();
+    }
 
     pub fn start(self: *Peer) !void {
         // return if already started.
@@ -113,30 +138,43 @@ pub const Peer = struct {
             const now = std.Io.Clock.real.now(self.io).toSeconds();
             const deadline = self.nearestDeadline() orelse now + self.peer_cfg.hold_time;
 
-            const Winner: type = union(enum) { msg: ReadMessageError!BGPMessage, sleep: std.Io.Cancelable!void };
-            var sel_buf: [2]Winner = undefined;
+            const Winner: type = union(enum) { msg: ReadMessageError!BGPMessage, sleep: std.Io.Cancelable!void, route_event: std.Io.Cancelable!event.RouteEvent };
+            var sel_buf: [3]Winner = undefined;
             var select = std.Io.Select(Winner).init(self.io, &sel_buf);
             select.async(.msg, Peer.readMessage, .{ self.*, &reader.interface });
             select.async(.sleep, std.Io.sleep, .{ self.io, std.Io.Duration.fromSeconds(@max(0, deadline - now)), std.Io.Clock.awake });
+            select.async(.route_event, event.RouteEventQueue.dequeue, .{self.route_event_queue});
             const winner: Winner = try select.await();
             select.cancelDiscard();
             switch (winner) {
                 .msg => |me| {
                     const m = try me;
-                    const event: fsm.FSMEvent = switch (m.body) {
+                    const fsm_event: fsm.FSMEvent = switch (m.body) {
                         .open => |o| .{ .open_received = o },
                         .keepalive => .keepalive_received,
                         .update => .update_received,
                         .notification => |n| .{ .notification_received = n },
                     };
                     std.debug.print("recv message: {}\n", .{m.header.msg_type});
-                    try self.handleFSMAction(&writer.interface, self.fsm.handle(event));
+                    try self.handleFSMAction(&writer.interface, self.fsm.handle(fsm_event));
                     // handle updates
                     m.body.deinit(self.allocator);
                 },
                 .sleep => {
                     std.debug.print("timer expired\n", .{});
                     // do nothing. checkTimers in the next iteration will handle timeout
+                },
+                .route_event => |re| {
+                    const r = try re;
+                    _ = try self.writeMessage(&writer.interface, .{
+                        .update = .{
+                            .withdrawn = r.withdraw,
+                            .origin = .igp,
+                            .as_path = .{ .sequence = &[_]u32{self.local_cfg.as_number} },
+                            .next_hop = self.local_cfg.router_id,
+                            .nlri = r.announce,
+                        },
+                    });
                 },
             }
         }

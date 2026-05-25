@@ -24,6 +24,19 @@ pub fn main(init: std.process.Init) !void {
         .remote_as = 65002,
     });
 
-    try speaker.start();
+    var start = init.io.async(bgp.Speaker.start, .{&speaker});
+    defer start.cancel(init.io) catch {};
+
+    var prefixes = std.ArrayList(bgp.Prefix).empty;
+    defer prefixes.deinit(allocator);
+    try prefixes.append(allocator, .{ .addr = [4]u8{ 10, 0, 0, 2 }, .len = 32 });
+
+    try std.Io.sleep(init.io, std.Io.Duration.fromSeconds(10), .awake);
+    try speaker.announce(prefixes.items);
+
+    try std.Io.sleep(init.io, std.Io.Duration.fromSeconds(10), .awake);
+    try speaker.withdraw(prefixes.items);
+
+    try start.await(init.io);
     defer speaker.stop();
 }

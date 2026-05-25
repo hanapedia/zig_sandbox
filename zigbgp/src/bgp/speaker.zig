@@ -2,6 +2,8 @@ const std = @import("std");
 const config = @import("../config.zig");
 const peer = @import("peer.zig");
 const fsm = @import("fsm.zig");
+const prefix = @import("prefix.zig");
+const event = @import("event.zig");
 
 /// Speaker represents BGP Speaker.
 pub const Speaker = struct {
@@ -38,13 +40,20 @@ pub const Speaker = struct {
 
     pub fn addPeer(self: *Self, peer_cfg: config.PeerConfig) !void {
         const p = try self.allocator.create(peer.Peer);
-        p.* = peer.Peer{ .allocator = self.allocator, .io = self.io, .peer_cfg = peer_cfg, .local_cfg = self.cfg, .fsm = fsm.FSM{
-            .local_as = self.cfg.as_number,
-            .router_id = self.cfg.router_id,
-            .hold_time = peer_cfg.hold_time,
-            .remote_as = peer_cfg.remote_as,
-        } };
+        p.* = try peer.Peer.init(self.allocator, self.io, peer_cfg, self.cfg);
         try self.peers.append(self.allocator, p);
+    }
+
+    pub fn announce(self: *Self, px: []prefix.V4Prefix) event.EnqueueError!void {
+        for (self.peers.items) |p| {
+            try p.route_event_queue.enqueue(.{ .announce = px, .withdraw = &.{} });
+        }
+    }
+
+    pub fn withdraw(self: *Self, px: []prefix.V4Prefix) event.EnqueueError!void {
+        for (self.peers.items) |p| {
+            try p.route_event_queue.enqueue(.{ .withdraw = px, .announce = &.{} });
+        }
     }
 
     pub fn start(self: *Self) !void {
