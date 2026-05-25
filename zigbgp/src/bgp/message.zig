@@ -23,11 +23,19 @@ pub const MessageType = enum(u8) {
     _,
 };
 
+pub const DecodeError = error{
+    BufferTooSmall,
+    InvalidMarker,
+    InvalidLength,
+};
+
+pub const EncodeError = error{BufferTooSmall};
+
 pub const Header = struct {
     length: u16,
     msg_type: MessageType,
 
-    pub fn decode(buf: []const u8) !Header {
+    pub fn decode(buf: []const u8) DecodeError!Header {
         if (buf.len < HEADER_LEN) return error.BufferTooSmall;
 
         // parse marker
@@ -48,7 +56,7 @@ pub const Header = struct {
         };
     }
 
-    pub fn encode(self: Header, buf: []u8) !void {
+    pub fn encode(self: Header, buf: []u8) EncodeError!void {
         if (buf.len < HEADER_LEN) return error.BufferTooSmall;
 
         // encode marker

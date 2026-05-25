@@ -16,12 +16,15 @@ pub const MsgHeaderSubcode = enum(u8) { not_synchronized = 1, bad_length = 2, ba
 pub const OpenSubcode = enum(u8) { unsupported_version = 1, bad_peer_as = 2, bad_bgp_id = 3, unsupported_opt_param = 4, unacceptable_hold_time = 6, _ };
 pub const CeaseSubcode = enum(u8) { admin_shutdown = 2, peer_deconfigured = 3, admin_reset = 4, _ };
 
+pub const DecodeError = error{BufferTooSmall} || std.mem.Allocator.Error;
+pub const EncodeError = error{BufferTooSmall};
+
 pub const Notification = struct {
     error_code: ErrorCode,
     error_subcode: u8,
     data: []const u8,
 
-    pub fn decode(buf: []const u8, allocator: std.mem.Allocator) !Notification {
+    pub fn decode(buf: []const u8, allocator: std.mem.Allocator) DecodeError!Notification {
         if (buf.len < MIN_MSG_LEN) return error.BufferTooSmall;
         return Notification{
             .error_code = @enumFromInt(buf[0]),
@@ -34,7 +37,7 @@ pub const Notification = struct {
         if (self.data.len > 0) allocator.free(self.data);
     }
 
-    pub fn encode(self: Notification, buf: []u8) !usize {
+    pub fn encode(self: Notification, buf: []u8) EncodeError!usize {
         if (buf.len < self.data.len + MIN_MSG_LEN) return error.BufferTooSmall;
         buf[0] = @intFromEnum(self.error_code);
         buf[1] = self.error_subcode;

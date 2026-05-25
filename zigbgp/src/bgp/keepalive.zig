@@ -1,6 +1,9 @@
 const std = @import("std");
 const message = @import("message.zig");
 
+pub const DecodeError = error{BufferTooSmall};
+pub const ValidateError = error{UnexpectedBody};
+
 /// encodes keepalive message into the buffer
 pub fn encode(buf: []u8) !void {
     // keepalive must be just a header

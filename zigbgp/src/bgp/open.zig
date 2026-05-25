@@ -23,6 +23,14 @@ pub const CAP_MULTIPROTOCOL_IPV4_AFI: u16 = 1;
 pub const CAP_MULTIPROTOCOL_IPV6_AFI: u16 = 2;
 pub const CAP_MULTIPROTOCOL_UNICAST_SAFI: u8 = 1;
 
+pub const DecodeError = error{
+    BufferTooSmall,
+    UnsupportedVersion,
+    InvalidLength,
+};
+
+pub const EncodeError = error{BufferTooSmall};
+
 pub const Open = struct {
     version: u8, // protocol version
     my_as: u16,
@@ -41,7 +49,7 @@ pub const Open = struct {
     }
 
     /// Parse an OPEN message body (everything after the 19-byte BGP header). No allocation.
-    pub fn decode(buf: []const u8) !Open {
+    pub fn decode(buf: []const u8) DecodeError!Open {
         if (buf.len < MIN_MSG_LEN) return error.BufferTooSmall;
         // parse version
         const version = buf[0];
@@ -110,7 +118,7 @@ pub const Open = struct {
         return open;
     }
 
-    pub fn encode(self: Open, buf: []u8) !usize {
+    pub fn encode(self: Open, buf: []u8) EncodeError!usize {
         if (buf.len < MIN_MSG_LEN) return error.BufferTooSmall;
 
         // write version

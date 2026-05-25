@@ -29,6 +29,13 @@ pub const AS_PATH_SEG_COUNT_LEN: usize = 1;
 pub const MIN_AS_PATH_SEG_LEN: usize = AS_PATH_SEG_TYPE_LEN + AS_PATH_SEG_COUNT_LEN;
 pub const AS_PATH_ASN_LEN: usize = 4;
 
+pub const PrefixDecodeError = error{
+    BufferTooSmall,
+    InvalidPrefixLen,
+};
+
+pub const PrefixEncodeError = error{BufferTooSmall};
+
 pub const V4Prefix = struct {
     len: u8,
     addr: [4]u8,
@@ -39,7 +46,7 @@ pub const V4Prefix = struct {
         return std.math.divCeil(u8, self.len, 8) catch unreachable;
     }
 
-    pub fn decode(buf: []const u8) !struct { prefix: V4Prefix, consumed: usize } {
+    pub fn decode(buf: []const u8) PrefixDecodeError!struct { prefix: V4Prefix, consumed: usize } {
         if (buf.len < V4_PREFIX_LENGTH_LEN) return error.BufferTooSmall;
 
         var prefix = V4Prefix{ .len = buf[0], .addr = [_]u8{0} ** 4 };
@@ -55,7 +62,7 @@ pub const V4Prefix = struct {
         return .{ .prefix = prefix, .consumed = V4_PREFIX_LENGTH_LEN + octets_needed };
     }
 
-    pub fn encode(self: V4Prefix, buf: []u8) !usize {
+    pub fn encode(self: V4Prefix, buf: []u8) PrefixEncodeError!usize {
         const octets_needed = self.octetsNeeded();
         if (buf.len < V4_PREFIX_LENGTH_LEN + octets_needed) return error.BufferTooSmall;
         buf[0] = self.len;
@@ -117,6 +124,14 @@ pub const AsPath = struct {
     }
 };
 
+pub const DecodeError = error{
+    BufferTooSmall,
+    InvalidLength,
+    DuplicatePathAttr,
+} || PrefixDecodeError || std.mem.Allocator.Error;
+
+pub const EncodeError = error{BufferTooSmall} || PrefixEncodeError;
+
 pub const Update = struct {
     withdrawn: []const V4Prefix,
     origin: ?Origin = null,
@@ -129,7 +144,7 @@ pub const Update = struct {
     /// Decode an UPDATE body. Allocates withdrawn, nlri, as_path, and each
     /// segment's asns slice. Call deinit() to free all of them.
     /// Caller must provide buf exactly as long as the Update body.
-    pub fn decode(buf: []const u8, allocator: std.mem.Allocator) !Update {
+    pub fn decode(buf: []const u8, allocator: std.mem.Allocator) DecodeError!Update {
         if (buf.len < MIN_MSG_LEN) return error.BufferTooSmall;
         var pos: usize = 0;
         var update = Update{
@@ -258,7 +273,7 @@ pub const Update = struct {
 
     /// Encode an UPDATE body into buf. Returns bytes written.
     /// No allocation — reads directly from the struct fields.
-    pub fn encode(self: Update, buf: []u8) !usize {
+    pub fn encode(self: Update, buf: []u8) EncodeError!usize {
         if (buf.len < MIN_MSG_LEN) return error.BufferTooSmall;
         var pos: usize = 0;
         // withdrawn_len (2)
