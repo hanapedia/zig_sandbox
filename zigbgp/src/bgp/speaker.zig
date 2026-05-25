@@ -52,10 +52,13 @@ pub const Speaker = struct {
         self.server = try address.listen(self.io, .{
             .reuse_address = true,
         });
-        for (self.peers.items) |p| {
-            try p.start();
-        }
         self.running.store(true, .seq_cst);
+        var peer_group = std.Io.Group.init;
+        defer peer_group.cancel(self.io);
+        for (self.peers.items) |p| {
+            try peer_group.concurrent(self.io, peer.Peer.start, .{p});
+        }
+        try peer_group.await(self.io);
     }
 
     pub fn stop(self: *Self) void {

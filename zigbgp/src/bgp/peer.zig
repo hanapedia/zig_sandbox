@@ -10,13 +10,17 @@ const notification = @import("./notification.zig");
 const CONNECTION_TIMEOUT: i64 = 30;
 const RECONNECTION_TIMEOUT: i64 = 30;
 
+pub const BGPMessage = struct { header: msg.Header, body: MessageBody };
+
+pub const MessageBodyEncodeError = open.EncodeError || update.EncodeError || notification.EncodeError;
+
 pub const MessageBody = union(enum) {
     open: open.Open,
     update: update.Update,
     notification: notification.Notification,
     keepalive,
 
-    pub fn encode(self: MessageBody, buf: []u8) !usize {
+    pub fn encode(self: MessageBody, buf: []u8) MessageBodyEncodeError!usize {
         return switch (self) {
             .open => |o| o.encode(buf),
             .keepalive => 0,
@@ -43,6 +47,15 @@ pub const MessageBody = union(enum) {
     }
 };
 
+pub const RunSessionError = std.Io.net.IpAddress.ConnectError || HandleFSMActionError || CheckTimersError || ReadMessageError || std.Io.Cancelable;
+pub const ReadMessageError = error{
+    BufferTooSmall,
+    InvalidMessageType,
+} || std.Io.Reader.Error || msg.DecodeError || open.DecodeError || update.DecodeError || notification.DecodeError;
+pub const WriteMessageError = MessageBodyEncodeError || msg.EncodeError || std.Io.Writer.Error;
+pub const HandleFSMActionError = WriteMessageError || std.Io.net.ShutdownError;
+pub const CheckTimersError = HandleFSMActionError || WriteMessageError;
+
 pub const Peer = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -58,25 +71,15 @@ pub const Peer = struct {
     hold_deadline: ?i64 = null,
     keepalive_deadline: ?i64 = null,
 
-    thread: ?std.Thread = null,
     running: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     // stop_fd: i32,
 
     pub fn start(self: *Peer) !void {
+        // return if already started.
         if (self.running.load(.acquire)) return;
         self.running.store(true, .release);
-        _ = self.fsm.handle(.manual_start);
-        self.thread = try std.Thread.spawn(.{}, Peer.run, .{self});
-    }
 
-    pub fn stop(self: *Peer) void {
-        if (!self.running.load(.acquire)) return;
-        self.running.store(false, .release);
-        if (self.conn) |c| c.close(self.io);
-        if (self.thread) |t| t.join();
-    }
-
-    fn run(self: *Peer) !void {
+        _ = self.fsm.handle(.manual_start); // init fsm
         while (self.running.load(.acquire)) {
             self.runSession() catch |err| {
                 std.debug.print("BGP session failed: {}\n", .{err});
@@ -87,7 +90,13 @@ pub const Peer = struct {
         }
     }
 
-    fn runSession(self: *Peer) !void {
+    pub fn stop(self: *Peer) void {
+        if (!self.running.load(.acquire)) return;
+        self.running.store(false, .release);
+        if (self.conn) |c| c.close(self.io);
+    }
+
+    fn runSession(self: *Peer) RunSessionError!void {
         if (self.conn == null) {
             self.conn = try self.peer_cfg.address.connect(self.io, .{ .mode = .stream });
         }
@@ -98,50 +107,42 @@ pub const Peer = struct {
         // tcp_connection_confirmed -> send open
         try self.handleFSMAction(&writer.interface, self.fsm.handle(.tcp_connection_confirmed));
 
-        var fds = [_]std.posix.pollfd{
-            .{ .fd = self.conn.?.socket.handle, .events = std.posix.POLL.IN, .revents = 0 },
-            // .{ .fd = self.stop_fd, .events = std.posix.POLL.IN, .revents = 0 },
-        };
-
         while (self.running.load(.acquire)) {
-            const now = std.Io.Clock.real.now(self.io).toSeconds();
-            const deadline = self.nearestDeadline() orelse -1;
-
-            const timeout_ms: i64 = if (deadline == -1) -1 else @max(0, deadline - now) * 1000;
-
-            _ = try std.posix.poll(&fds, @intCast(timeout_ms));
-
-            // if (fds[1].revents & (std.posix.POLL.IN) != 0) {
-            //     try self.handleFSMAction(writer, self.fsm.handle(.manual_stop));
-            //     return;
-            // }
-
-            if (fds[0].revents & (std.posix.POLL.NVAL) != 0) {
-                return error.InvalidFd;
-            }
-
-            if (fds[0].revents & (std.posix.POLL.ERR | std.posix.POLL.HUP) != 0) {
-                return error.ConnecitonReset;
-            }
-
-            if (fds[0].revents & (std.posix.POLL.IN) != 0) {
-                const message = try self.readMessage(&reader.interface);
-                const event: fsm.FSMEvent = switch (message.body) {
-                    .open => |o| .{ .open_received = o },
-                    .keepalive => .keepalive_received,
-                    .update => .update_received,
-                    .notification => |n| .{ .notification_received = n },
-                };
-                std.debug.print("recv message: {}\n", .{message.header.msg_type});
-                try self.handleFSMAction(&writer.interface, self.fsm.handle(event));
-                // handle updates
-                message.body.deinit(self.allocator);
-            }
+            // check timer first
             try self.checkTimers(&writer.interface);
+            const now = std.Io.Clock.real.now(self.io).toSeconds();
+            const deadline = self.nearestDeadline() orelse now + self.peer_cfg.hold_time;
+
+            const Winner: type = union(enum) { msg: ReadMessageError!BGPMessage, sleep: std.Io.Cancelable!void };
+            var sel_buf: [2]Winner = undefined;
+            var select = std.Io.Select(Winner).init(self.io, &sel_buf);
+            select.async(.msg, Peer.readMessage, .{ self.*, &reader.interface });
+            select.async(.sleep, std.Io.sleep, .{ self.io, std.Io.Duration.fromSeconds(@max(0, deadline - now)), std.Io.Clock.awake });
+            const winner: Winner = try select.await();
+            select.cancelDiscard();
+            switch (winner) {
+                .msg => |me| {
+                    const m = try me;
+                    const event: fsm.FSMEvent = switch (m.body) {
+                        .open => |o| .{ .open_received = o },
+                        .keepalive => .keepalive_received,
+                        .update => .update_received,
+                        .notification => |n| .{ .notification_received = n },
+                    };
+                    std.debug.print("recv message: {}\n", .{m.header.msg_type});
+                    try self.handleFSMAction(&writer.interface, self.fsm.handle(event));
+                    // handle updates
+                    m.body.deinit(self.allocator);
+                },
+                .sleep => {
+                    std.debug.print("timer expired\n", .{});
+                    // do nothing. checkTimers in the next iteration will handle timeout
+                },
+            }
         }
     }
 
-    fn readMessage(self: Peer, reader: *std.Io.Reader) !struct { header: msg.Header, body: MessageBody } {
+    fn readMessage(self: Peer, reader: *std.Io.Reader) ReadMessageError!BGPMessage {
         var buf: [msg.MAX_MSG_LEN]u8 = undefined;
         // read header
         reader.readSliceAll(buf[0..msg.HEADER_LEN]) catch |err| {
@@ -179,7 +180,7 @@ pub const Peer = struct {
         return .{ .header = header, .body = body };
     }
 
-    pub fn writeMessage(_: Peer, writer: *std.Io.Writer, body: MessageBody) !usize {
+    pub fn writeMessage(_: Peer, writer: *std.Io.Writer, body: MessageBody) WriteMessageError!usize {
         var buf: [msg.MAX_MSG_LEN]u8 = undefined;
         const body_len = try body.encode(buf[msg.HEADER_LEN..]);
         const header = msg.Header{ .length = @intCast(msg.HEADER_LEN + body_len), .msg_type = body.toMessageTypeEnum() };
@@ -189,7 +190,7 @@ pub const Peer = struct {
         return header.length;
     }
 
-    fn handleFSMAction(self: *Peer, writer: *std.Io.Writer, action: fsm.FSMAction) !void {
+    fn handleFSMAction(self: *Peer, writer: *std.Io.Writer, action: fsm.FSMAction) HandleFSMActionError!void {
         if (action.negotiated_hold_time) |_| {
             self.resetHoldTimer();
         }
@@ -208,7 +209,7 @@ pub const Peer = struct {
         }
     }
 
-    fn checkTimers(self: *Peer, writer: *std.Io.Writer) !void {
+    fn checkTimers(self: *Peer, writer: *std.Io.Writer) CheckTimersError!void {
         const now = std.Io.Clock.real.now(self.io).toSeconds();
         if (self.hold_deadline) |h| {
             if (now >= h) {

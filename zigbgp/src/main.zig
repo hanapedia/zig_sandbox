@@ -11,14 +11,6 @@ pub fn main(init: std.process.Init) !void {
     });
     defer speaker.deinit();
 
-    try speaker.addPeer(.{
-        .address = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 1790),
-        .remote_as = 65002,
-    });
-
-    try speaker.start();
-    defer speaker.stop();
-
     std.log.info("ZigBGP running — AS {d}, router-id {d}.{d}.{d}.{d}", .{
         speaker.cfg.as_number,
         speaker.cfg.router_id[0],
@@ -27,6 +19,11 @@ pub fn main(init: std.process.Init) !void {
         speaker.cfg.router_id[3],
     });
 
-    // Block until interrupted (Ctrl-C / SIGTERM).
-    try std.Io.sleep(init.io, std.Io.Duration.fromSeconds(30), .awake);
+    try speaker.addPeer(.{
+        .address = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 1790),
+        .remote_as = 65002,
+    });
+
+    try speaker.start();
+    defer speaker.stop();
 }
