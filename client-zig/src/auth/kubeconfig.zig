@@ -6,7 +6,7 @@
 const std = @import("std");
 
 /// Resolved configuration ready for use by the HTTP client.
-pub const Config = struct {
+pub const KubeConfig = struct {
     allocator: std.mem.Allocator,
     host: []const u8,
     token: ?[]const u8,
@@ -14,7 +14,7 @@ pub const Config = struct {
     skip_tls_verify: bool,
     namespace: ?[]const u8,
 
-    pub fn deinit(self: *Config) void {
+    pub fn deinit(self: *KubeConfig) void {
         self.allocator.free(self.host);
         if (self.token) |t| self.allocator.free(t);
         if (self.ca_cert) |c| self.allocator.free(c);
@@ -87,7 +87,7 @@ const KubeconfigJson = struct {
 
 /// Load kubeconfig from the given path or default location.
 /// If path is null, tries $KUBECONFIG, then ~/.kube/config.json.
-pub fn load(io: std.Io, environ_map: *std.process.Environ.Map, allocator: std.mem.Allocator, path: ?[]const u8) !Config {
+pub fn load(io: std.Io, environ_map: *std.process.Environ.Map, allocator: std.mem.Allocator, path: ?[]const u8) !KubeConfig {
     const config_path = if (path) |p| p else try getDefaultPath(environ_map, allocator);
     const should_free_path = path == null;
     defer if (should_free_path) allocator.free(config_path);
@@ -105,7 +105,7 @@ pub fn load(io: std.Io, environ_map: *std.process.Environ.Map, allocator: std.me
     return parseKubeconfig(io, allocator, content);
 }
 
-fn parseKubeconfig(io: std.Io, allocator: std.mem.Allocator, content: []const u8) !Config {
+fn parseKubeconfig(io: std.Io, allocator: std.mem.Allocator, content: []const u8) !KubeConfig {
     const parsed = std.json.parseFromSlice(KubeconfigJson, allocator, content, .{
         .ignore_unknown_fields = true,
         .allocate = .alloc_always,

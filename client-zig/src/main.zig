@@ -10,7 +10,7 @@ pub fn main(init: std.process.Init) !void {
     const environ_map = init.environ_map;
 
     // Try to load kubeconfig, fall back to in-cluster config
-    var config = loadConfig(io, environ_map, allocator) catch |err| {
+    var config = k8s.config.loadConfig(io, environ_map, allocator) catch |err| {
         std.debug.print("Failed to load config: {}\n", .{err});
         return err;
     };
@@ -65,50 +65,6 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("Failed to watch pods: {}\n", .{err});
     };
 }
-
-fn loadConfig(io: std.Io, environ_map: *std.process.Environ.Map, allocator: std.mem.Allocator) !Config {
-    // Try kubeconfig first, fall back to in-cluster config
-    if (k8s.kubeconfig.load(io, environ_map, allocator, null)) |cfg| {
-        return .{
-            .allocator = allocator,
-            .host = cfg.host,
-            .token = cfg.token,
-            .ca_cert = cfg.ca_cert,
-            .skip_tls_verify = cfg.skip_tls_verify,
-            .namespace = cfg.namespace,
-            .source = .kubeconfig,
-        };
-    } else |_| {
-        // Fall back to in-cluster config
-        const in_cluster = try k8s.in_cluster.InClusterConfig.load(io, environ_map, allocator);
-        return .{
-            .allocator = allocator,
-            .host = in_cluster.host,
-            .token = in_cluster.token,
-            .ca_cert = in_cluster.ca_cert,
-            .skip_tls_verify = false,
-            .namespace = in_cluster.namespace,
-            .source = .in_cluster,
-        };
-    }
-}
-
-const Config = struct {
-    allocator: std.mem.Allocator,
-    host: []const u8,
-    token: ?[]const u8,
-    ca_cert: ?[]const u8,
-    skip_tls_verify: bool,
-    namespace: ?[]const u8,
-    source: enum { kubeconfig, in_cluster },
-
-    fn deinit(self: *Config) void {
-        self.allocator.free(self.host);
-        if (self.token) |t| self.allocator.free(t);
-        if (self.ca_cert) |c| self.allocator.free(c);
-        if (self.namespace) |n| self.allocator.free(n);
-    }
-};
 
 fn listNamespaces(client: *k8s.Client) !void {
     var result = try k8s.namespaces(client).list(.{});

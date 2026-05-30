@@ -49,6 +49,7 @@ pub const proto = @import("proto/mod.zig");
 pub const Client = client.Client;
 pub const kubeconfig = auth.kubeconfig;
 pub const in_cluster = auth.in_cluster;
+pub const config = auth.config;
 pub const TypedClient = api.TypedClient;
 pub const ListOptions = api.ListOptions;
 pub const ResourceInfo = api.ResourceInfo;
