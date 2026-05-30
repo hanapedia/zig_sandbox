@@ -44,13 +44,13 @@ pub const Speaker = struct {
         try self.peers.append(self.allocator, p);
     }
 
-    pub fn announce(self: *Self, px: []prefix.V4Prefix) event.EnqueueError!void {
+    pub fn announce(self: *Self, px: []prefix.V4Prefix) event.Error!void {
         for (self.peers.items) |p| {
             try p.route_event_queue.enqueue(.{ .announce = px, .withdraw = &.{} });
         }
     }
 
-    pub fn withdraw(self: *Self, px: []prefix.V4Prefix) event.EnqueueError!void {
+    pub fn withdraw(self: *Self, px: []prefix.V4Prefix) event.Error!void {
         for (self.peers.items) |p| {
             try p.route_event_queue.enqueue(.{ .withdraw = px, .announce = &.{} });
         }

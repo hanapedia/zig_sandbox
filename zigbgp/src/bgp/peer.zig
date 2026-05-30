@@ -48,7 +48,7 @@ pub const MessageBody = union(enum) {
     }
 };
 
-pub const RunSessionError = std.Io.net.IpAddress.ConnectError || HandleFSMActionError || CheckTimersError || ReadMessageError || std.Io.Cancelable;
+pub const RunSessionError = std.Io.net.IpAddress.ConnectError || HandleFSMActionError || CheckTimersError || ReadMessageError || std.Io.Cancelable || event.Error;
 pub const ReadMessageError = error{
     BufferTooSmall,
     InvalidMessageType,
@@ -78,7 +78,7 @@ pub const Peer = struct {
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, peer_cfg: config.PeerConfig, local_cfg: config.LocalConfig) !Peer {
         const req = try allocator.create(event.RouteEventQueue);
-        req.* = event.RouteEventQueue.init(allocator, io);
+        req.* = try event.RouteEventQueue.init(allocator, io);
 
         return .{
             .allocator = allocator,
@@ -138,7 +138,7 @@ pub const Peer = struct {
             const now = std.Io.Clock.real.now(self.io).toSeconds();
             const deadline = self.nearestDeadline() orelse now + self.peer_cfg.hold_time;
 
-            const Winner: type = union(enum) { msg: ReadMessageError!BGPMessage, sleep: std.Io.Cancelable!void, route_event: std.Io.Cancelable!event.RouteEvent };
+            const Winner: type = union(enum) { msg: ReadMessageError!BGPMessage, sleep: std.Io.Cancelable!void, route_event: event.Error!event.RouteEvent };
             var sel_buf: [3]Winner = undefined;
             var select = std.Io.Select(Winner).init(self.io, &sel_buf);
             select.async(.msg, Peer.readMessage, .{ self.*, &reader.interface });
