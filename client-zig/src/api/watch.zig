@@ -64,7 +64,7 @@ pub const EventType = enum {
         if (std.mem.eql(u8, s, "DELETED")) return .DELETED;
         if (std.mem.eql(u8, s, "BOOKMARK")) return .BOOKMARK;
         if (std.mem.eql(u8, s, "ERROR")) return .ERROR;
-        return error.UnknownEventType;
+        return error.InvalidEventType;
     }
 };
 
@@ -724,7 +724,7 @@ pub fn Watcher(comptime T: type) type {
 
             // Get event type
             const event_type = EventType.fromString(watch_event.type orelse "ADDED") catch {
-                return error.UnknownEventType;
+                return error.InvalidEventType;
             };
 
             // The object field contains RawExtension with the serialized resource
@@ -791,7 +791,7 @@ pub fn Watcher(comptime T: type) type {
             // Convert type string to enum
             const event_type = EventType.fromString(parsed.value.type) catch {
                 parsed.deinit();
-                return error.UnknownEventType;
+                return error.InvalidEventType;
             };
 
             return WatchEvent(T){

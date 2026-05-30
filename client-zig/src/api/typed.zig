@@ -29,8 +29,10 @@ pub const ResourceInfo = struct {
         }
 
         if (self.namespaced) {
-            try path.appendSlice(allocator, "/namespaces/");
-            try path.appendSlice(allocator, namespace orelse "default");
+            if (namespace) |ns| {
+                try path.appendSlice(allocator, "/namespaces/");
+                try path.appendSlice(allocator, ns);
+            }
         }
 
         try path.appendSlice(allocator, "/");
@@ -338,17 +340,17 @@ test "TypedClient path building" {
     };
 
     // Test resource path
-    const resource_path = try typed.buildResourcePath("my-pod");
+    const resource_path = try typed.pathForGet("my-pod");
     defer allocator.free(resource_path);
     try std.testing.expectEqualStrings("/api/v1/namespaces/default/pods/my-pod", resource_path);
 
     // Test list path
-    const list_path = try typed.buildListPath(.{});
+    const list_path = try typed.pathForList(.{});
     defer allocator.free(list_path);
     try std.testing.expectEqualStrings("/api/v1/namespaces/default/pods", list_path);
 
     // Test list path with selector
-    const list_path_selector = try typed.buildListPath(.{ .labelSelector = "app=nginx" });
+    const list_path_selector = try typed.pathForList(.{ .labelSelector = "app=nginx" });
     defer allocator.free(list_path_selector);
     try std.testing.expectEqualStrings("/api/v1/namespaces/default/pods?labelSelector=app=nginx", list_path_selector);
 }
@@ -376,9 +378,41 @@ test "TypedClient cluster-scoped resource" {
         },
     };
 
-    const path = try typed.buildResourcePath("node-1");
+    const path = try typed.pathForGet("node-1");
     defer allocator.free(path);
     try std.testing.expectEqualStrings("/api/v1/nodes/node-1", path);
+}
+
+test "TypedClient all-namespaces (null namespace on namespaced resource)" {
+    const TestResource = struct {};
+    const TestResourceList = struct {};
+
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+
+    var client = try Client.init(io, allocator, .{
+        .host = "https://localhost:6443",
+    });
+    defer client.deinit();
+
+    const typed = TypedClient(TestResource, TestResourceList){
+        .client = &client,
+        .namespace = null,
+        .info = .{
+            .api_version = "v1",
+            .api_group = "",
+            .plural = "pods",
+            .namespaced = true,
+        },
+    };
+
+    const list_path = try typed.pathForList(.{});
+    defer allocator.free(list_path);
+    try std.testing.expectEqualStrings("/api/v1/pods", list_path);
+
+    const list_path_selector = try typed.pathForList(.{ .labelSelector = "app=nginx" });
+    defer allocator.free(list_path_selector);
+    try std.testing.expectEqualStrings("/api/v1/pods?labelSelector=app=nginx", list_path_selector);
 }
 
 test "TypedClient apps group resource" {
@@ -404,7 +438,7 @@ test "TypedClient apps group resource" {
         },
     };
 
-    const path = try typed.buildResourcePath("nginx");
+    const path = try typed.pathForGet("nginx");
     defer allocator.free(path);
     try std.testing.expectEqualStrings("/apis/apps/v1/namespaces/default/deployments/nginx", path);
 }
