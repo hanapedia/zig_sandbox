@@ -37,15 +37,15 @@ pub const RouteEventQueue = struct {
     /// tris to deinit the internal buffer. Error if queue is not drained.
     pub fn deinit(self: *RouteEventQueue) DeinitError!void {
         if (self.len.load(.acquire) != 0) return error.QueueNotDrained;
-        self.allocator.destroy(self._events);
+        self.allocator.free(self._events);
     }
 
     /// deinit the internal buffer by forcifully draining
     pub fn deinitForce(self: *RouteEventQueue) DeinitError!void {
         while (self.len.load(.acquire) > 0) {
-            _ = self.dequeue();
+            _ = self.dequeue() catch break;
         }
-        self.allocator.destroy(self._events);
+        self.allocator.free(self._events);
     }
 
     /// dequeue pops a route from the events queue
