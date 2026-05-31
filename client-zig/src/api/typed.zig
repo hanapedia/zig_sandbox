@@ -14,7 +14,7 @@ pub const ResourceInfo = struct {
     plural: []const u8,
     namespaced: bool,
 
-    pub fn buildPath(self: Self, allocator: std.mem.Allocator, namespace: ?[]const u8, name: ?[]const u8, query_params: ?QueryParams) ![]const u8 {
+    pub fn buildPath(self: Self, allocator: std.mem.Allocator, namespace: ?[]const u8, name: ?[]const u8, subresource: ?[]const u8, query_params: ?QueryParams) ![]const u8 {
         var path: std.ArrayList(u8) = .empty;
         errdefer path.deinit(allocator);
 
@@ -40,6 +40,10 @@ pub const ResourceInfo = struct {
         if (name) |n| {
             try path.appendSlice(allocator, "/");
             try path.appendSlice(allocator, n);
+        }
+        if (subresource) |sr| {
+            try path.appendSlice(allocator, "/");
+            try path.appendSlice(allocator, sr);
         }
 
         if (query_params) |params| {
@@ -167,20 +171,19 @@ pub fn TypedClient(comptime T: type, comptime L: type) type {
         const Self = @This();
 
         client: *Client,
-        namespace: ?[]const u8,
         info: ResourceInfo,
 
         /// Get a single resource by name.
-        pub fn get(self: Self, name: []const u8) !Client.ProtoResult(T) {
-            const path = try self.pathForGet(name);
+        pub fn get(self: Self, namespace: ?[]const u8, name: []const u8) !Client.ProtoResult(T) {
+            const path = try self.pathForGet(namespace, name);
             defer self.client.allocator.free(path);
 
             return self.client.get(T, path);
         }
 
         /// List all resources matching the criteria.
-        pub fn list(self: Self, options: ListOptions) !Client.ProtoResult(L) {
-            const path = try self.pathForList(options);
+        pub fn list(self: Self, namespace: ?[]const u8, options: ListOptions) !Client.ProtoResult(L) {
+            const path = try self.pathForList(namespace, options);
             defer self.client.allocator.free(path);
 
             return self.client.get(L, path);
@@ -188,23 +191,13 @@ pub fn TypedClient(comptime T: type, comptime L: type) type {
 
         /// Start watching resources.
         /// Returns a Watcher that yields typed WatchEvent(T) objects.
-        ///
-        /// Example:
-        ///
-        /// var watcher = try k8s.pods(&client, "default").watch(.{});
-        /// defer watcher.deinit();
-        ///
-        /// while (try watcher.next()) |*event| {
-        ///     defer event.deinit();
-        ///     // handle event
-        /// }
-        pub fn watch(self: Self, options: watcher.WatchOptions) !watcher.Watcher(T) {
-            return watcher.Watcher(T).init(self.client, self.namespace, self.info, options);
+        pub fn watch(self: Self, namespace: ?[]const u8, options: watcher.WatchOptions) !watcher.Watcher(T) {
+            return watcher.Watcher(T).init(self.client, namespace, self.info, options);
         }
 
         /// Create a new resource.
-        pub fn create(self: Self, resource: T, options: CreateOptions) !Client.ProtoResult(T) {
-            const path = try self.pathForCreate(options);
+        pub fn create(self: Self, namespace: ?[]const u8, resource: T, options: CreateOptions) !Client.ProtoResult(T) {
+            const path = try self.pathForCreate(namespace, options);
             defer self.client.allocator.free(path);
 
             return self.client.post(T, path, resource);
@@ -212,8 +205,8 @@ pub fn TypedClient(comptime T: type, comptime L: type) type {
 
         /// Update (replace) an existing resource.
         /// The resource must have metadata.resourceVersion set.
-        pub fn update(self: Self, name: []const u8, resource: T, options: UpdateOptions) !Client.ProtoResult(T) {
-            const path = try self.pathForUpdate(name, options);
+        pub fn update(self: Self, namespace: ?[]const u8, name: []const u8, resource: T, options: UpdateOptions) !Client.ProtoResult(T) {
+            const path = try self.pathForUpdate(namespace, name, options);
             defer self.client.allocator.free(path);
 
             return self.client.put(T, path, resource);
@@ -221,8 +214,8 @@ pub fn TypedClient(comptime T: type, comptime L: type) type {
 
         /// Delete a resource by name.
         /// Returns Status on success.
-        pub fn delete(self: Self, name: []const u8, options: DeleteOptions) !Client.ProtoResult(Status) {
-            const path = try self.pathForDelete(name, options);
+        pub fn delete(self: Self, namespace: ?[]const u8, name: []const u8, options: DeleteOptions) !Client.ProtoResult(Status) {
+            const path = try self.pathForDelete(namespace, name, options);
             defer self.client.allocator.free(path);
 
             return self.client.deleteResource(Status, path);
@@ -230,40 +223,40 @@ pub fn TypedClient(comptime T: type, comptime L: type) type {
 
         /// Delete multiple resources matching the criteria.
         /// Returns Status on success.
-        pub fn deleteCollection(self: Self, options: DeleteCollectionOptions) !Client.ProtoResult(Status) {
-            const path = try self.pathForDeleteCollection(options);
+        pub fn deleteCollection(self: Self, namespace: ?[]const u8, options: DeleteCollectionOptions) !Client.ProtoResult(Status) {
+            const path = try self.pathForDeleteCollection(namespace, options);
             defer self.client.allocator.free(path);
 
             return self.client.deleteResource(Status, path);
         }
 
         /// Patch a resource using strategic merge patch (default).
-        pub fn patchStrategicMerge(self: Self, name: []const u8, patch_json: []const u8, options: PatchOptions) !Client.ProtoResult(T) {
-            const path = try self.pathForPatch(name, options);
+        pub fn patchStrategicMerge(self: Self, namespace: ?[]const u8, name: []const u8, patch_json: []const u8, options: PatchOptions) !Client.ProtoResult(T) {
+            const path = try self.pathForPatch(namespace, name, options);
             defer self.client.allocator.free(path);
 
             return self.client.patch(T, path, patch_json, .strategic_merge_patch);
         }
 
         /// Patch a resource using JSON patch (RFC 6902).
-        pub fn patchJson(self: Self, name: []const u8, patch_json: []const u8, options: PatchOptions) !Client.ProtoResult(T) {
-            const path = try self.pathForPatch(name, options);
+        pub fn patchJson(self: Self, namespace: ?[]const u8, name: []const u8, patch_json: []const u8, options: PatchOptions) !Client.ProtoResult(T) {
+            const path = try self.pathForPatch(namespace, name, options);
             defer self.client.allocator.free(path);
 
             return self.client.patch(T, path, patch_json, .json_patch);
         }
 
         /// Patch a resource using merge patch (RFC 7386).
-        pub fn patchMerge(self: Self, name: []const u8, patch_json: []const u8, options: PatchOptions) !Client.ProtoResult(T) {
-            const path = try self.pathForPatch(name, options);
+        pub fn patchMerge(self: Self, namespace: ?[]const u8, name: []const u8, patch_json: []const u8, options: PatchOptions) !Client.ProtoResult(T) {
+            const path = try self.pathForPatch(namespace, name, options);
             defer self.client.allocator.free(path);
 
             return self.client.patch(T, path, patch_json, .merge_patch);
         }
 
         /// Server-side apply a resource.
-        pub fn apply(self: Self, name: []const u8, patch_yaml: []const u8, options: PatchOptions) !Client.ProtoResult(T) {
-            const path = try self.pathForPatch(name, options);
+        pub fn apply(self: Self, namespace: ?[]const u8, name: []const u8, patch_yaml: []const u8, options: PatchOptions) !Client.ProtoResult(T) {
+            const path = try self.pathForPatch(namespace, name, options);
             defer self.client.allocator.free(path);
 
             return self.client.patch(T, path, patch_yaml, .apply_patch);
@@ -274,43 +267,104 @@ pub fn TypedClient(comptime T: type, comptime L: type) type {
         // ====================================================================
 
         /// GET single resource
-        pub fn pathForGet(self: Self, name: []const u8) ![]const u8 {
-            return self.info.buildPath(self.client.allocator, self.namespace, name, null);
+        pub fn pathForGet(self: Self, namespace: ?[]const u8, name: []const u8) ![]const u8 {
+            return self.info.buildPath(self.client.allocator, namespace, name, null, null);
         }
 
         /// LIST resources
-        pub fn pathForList(self: Self, options: ListOptions) ![]const u8 {
-            return self.info.buildPath(self.client.allocator, self.namespace, null, .{ .list = options });
+        pub fn pathForList(self: Self, namespace: ?[]const u8, options: ListOptions) ![]const u8 {
+            return self.info.buildPath(self.client.allocator, namespace, null, null, .{ .list = options });
         }
 
         /// WATCH resources
-        pub fn pathForWatch(self: Self, options: watcher.WatchOptions) ![]const u8 {
-            return self.info.buildPath(self.client.allocator, self.namespace, null, .{ .watch = options });
+        pub fn pathForWatch(self: Self, namespace: ?[]const u8, options: watcher.WatchOptions) ![]const u8 {
+            return self.info.buildPath(self.client.allocator, namespace, null, null, .{ .watch = options });
         }
 
         /// CREATE resource
-        pub fn pathForCreate(self: Self, options: CreateOptions) ![]const u8 {
-            return self.info.buildPath(self.client.allocator, self.namespace, null, .{ .create = options });
+        pub fn pathForCreate(self: Self, namespace: ?[]const u8, options: CreateOptions) ![]const u8 {
+            return self.info.buildPath(self.client.allocator, namespace, null, null, .{ .create = options });
         }
 
         /// UPDATE resource
-        pub fn pathForUpdate(self: Self, name: []const u8, options: UpdateOptions) ![]const u8 {
-            return self.info.buildPath(self.client.allocator, self.namespace, name, .{ .update = options });
+        pub fn pathForUpdate(self: Self, namespace: ?[]const u8, name: []const u8, options: UpdateOptions) ![]const u8 {
+            return self.info.buildPath(self.client.allocator, namespace, name, null, .{ .update = options });
         }
 
         /// DELETE single resource
-        pub fn pathForDelete(self: Self, name: []const u8, options: DeleteOptions) ![]const u8 {
-            return self.info.buildPath(self.client.allocator, self.namespace, name, .{ .delete = options });
+        pub fn pathForDelete(self: Self, namespace: ?[]const u8, name: []const u8, options: DeleteOptions) ![]const u8 {
+            return self.info.buildPath(self.client.allocator, namespace, name, null, .{ .delete = options });
         }
 
         /// DELETE collection
-        pub fn pathForDeleteCollection(self: Self, options: DeleteCollectionOptions) ![]const u8 {
-            return self.info.buildPath(self.client.allocator, self.namespace, null, .{ .deleteCollection = options });
+        pub fn pathForDeleteCollection(self: Self, namespace: ?[]const u8, options: DeleteCollectionOptions) ![]const u8 {
+            return self.info.buildPath(self.client.allocator, namespace, null, null, .{ .deleteCollection = options });
         }
 
         /// PATCH resource
-        pub fn pathForPatch(self: Self, name: []const u8, options: PatchOptions) ![]const u8 {
-            return self.info.buildPath(self.client.allocator, self.namespace, name, .{ .patch = options });
+        pub fn pathForPatch(self: Self, namespace: ?[]const u8, name: []const u8, options: PatchOptions) ![]const u8 {
+            return self.info.buildPath(self.client.allocator, namespace, name, null, .{ .patch = options });
+        }
+
+        /// GET subresource (e.g. "status", "scale")
+        pub fn pathForGetSubresource(self: Self, namespace: ?[]const u8, name: []const u8, subresource: []const u8) ![]const u8 {
+            return self.info.buildPath(self.client.allocator, namespace, name, subresource, null);
+        }
+
+        /// UPDATE subresource
+        pub fn pathForUpdateSubresource(self: Self, namespace: ?[]const u8, name: []const u8, subresource: []const u8, options: UpdateOptions) ![]const u8 {
+            return self.info.buildPath(self.client.allocator, namespace, name, subresource, .{ .update = options });
+        }
+
+        /// PATCH subresource
+        pub fn pathForPatchSubresource(self: Self, namespace: ?[]const u8, name: []const u8, subresource: []const u8, options: PatchOptions) ![]const u8 {
+            return self.info.buildPath(self.client.allocator, namespace, name, subresource, .{ .patch = options });
+        }
+
+        // ====================================================================
+        // Subresource operations
+        // ====================================================================
+
+        /// Get a subresource (e.g. pods/{name}/status).
+        pub fn getSubresource(self: Self, namespace: ?[]const u8, name: []const u8, subresource: []const u8) !Client.ProtoResult(T) {
+            const path = try self.pathForGetSubresource(namespace, name, subresource);
+            defer self.client.allocator.free(path);
+            return self.client.get(T, path);
+        }
+
+        /// Update (replace) a subresource.
+        pub fn updateSubresource(self: Self, namespace: ?[]const u8, name: []const u8, subresource: []const u8, resource: T, options: UpdateOptions) !Client.ProtoResult(T) {
+            const path = try self.pathForUpdateSubresource(namespace, name, subresource, options);
+            defer self.client.allocator.free(path);
+            return self.client.put(T, path, resource);
+        }
+
+        /// Patch a subresource using strategic merge patch.
+        pub fn patchStrategicMergeSubresource(self: Self, namespace: ?[]const u8, name: []const u8, subresource: []const u8, patch_json: []const u8, options: PatchOptions) !Client.ProtoResult(T) {
+            const path = try self.pathForPatchSubresource(namespace, name, subresource, options);
+            defer self.client.allocator.free(path);
+            return self.client.patch(T, path, patch_json, .strategic_merge_patch);
+        }
+
+        /// Patch a subresource using JSON patch (RFC 6902).
+        pub fn patchJsonSubresource(self: Self, namespace: ?[]const u8, name: []const u8, subresource: []const u8, patch_json: []const u8, options: PatchOptions) !Client.ProtoResult(T) {
+            const path = try self.pathForPatchSubresource(namespace, name, subresource, options);
+            defer self.client.allocator.free(path);
+            return self.client.patch(T, path, patch_json, .json_patch);
+        }
+
+        /// Patch a subresource using merge patch (RFC 7386).
+        pub fn patchMergeSubresource(self: Self, namespace: ?[]const u8, name: []const u8, subresource: []const u8, patch_json: []const u8, options: PatchOptions) !Client.ProtoResult(T) {
+            const path = try self.pathForPatchSubresource(namespace, name, subresource, options);
+            defer self.client.allocator.free(path);
+            return self.client.patch(T, path, patch_json, .merge_patch);
+        }
+
+        /// Apply a subresource using server-side apply.
+        pub fn applySubresource(self: Self, namespace: ?[]const u8, name: []const u8, subresource: []const u8, patch_yaml: []const u8, options: PatchOptions) !Client.ProtoResult(T) {
+            const path = try self.pathForPatchSubresource(namespace, name, subresource, options);
+            defer self.client.allocator.free(path);
+            return self.client.patch(T, path, patch_yaml, .apply_patch);
         }
     };
 }
@@ -330,7 +384,6 @@ test "TypedClient path building" {
 
     const typed = TypedClient(TestResource, TestResourceList){
         .client = &client,
-        .namespace = "default",
         .info = .{
             .api_version = "v1",
             .api_group = "",
@@ -340,17 +393,17 @@ test "TypedClient path building" {
     };
 
     // Test resource path
-    const resource_path = try typed.pathForGet("my-pod");
+    const resource_path = try typed.pathForGet("default", "my-pod");
     defer allocator.free(resource_path);
     try std.testing.expectEqualStrings("/api/v1/namespaces/default/pods/my-pod", resource_path);
 
     // Test list path
-    const list_path = try typed.pathForList(.{});
+    const list_path = try typed.pathForList("default", .{});
     defer allocator.free(list_path);
     try std.testing.expectEqualStrings("/api/v1/namespaces/default/pods", list_path);
 
     // Test list path with selector
-    const list_path_selector = try typed.pathForList(.{ .labelSelector = "app=nginx" });
+    const list_path_selector = try typed.pathForList("default", .{ .labelSelector = "app=nginx" });
     defer allocator.free(list_path_selector);
     try std.testing.expectEqualStrings("/api/v1/namespaces/default/pods?labelSelector=app=nginx", list_path_selector);
 }
@@ -369,7 +422,6 @@ test "TypedClient cluster-scoped resource" {
 
     const typed = TypedClient(ClusterResource, ClusterResourceList){
         .client = &client,
-        .namespace = null,
         .info = .{
             .api_version = "v1",
             .api_group = "",
@@ -378,7 +430,7 @@ test "TypedClient cluster-scoped resource" {
         },
     };
 
-    const path = try typed.pathForGet("node-1");
+    const path = try typed.pathForGet(null, "node-1");
     defer allocator.free(path);
     try std.testing.expectEqualStrings("/api/v1/nodes/node-1", path);
 }
@@ -397,7 +449,6 @@ test "TypedClient all-namespaces (null namespace on namespaced resource)" {
 
     const typed = TypedClient(TestResource, TestResourceList){
         .client = &client,
-        .namespace = null,
         .info = .{
             .api_version = "v1",
             .api_group = "",
@@ -406,13 +457,44 @@ test "TypedClient all-namespaces (null namespace on namespaced resource)" {
         },
     };
 
-    const list_path = try typed.pathForList(.{});
+    const list_path = try typed.pathForList(null, .{});
     defer allocator.free(list_path);
     try std.testing.expectEqualStrings("/api/v1/pods", list_path);
 
-    const list_path_selector = try typed.pathForList(.{ .labelSelector = "app=nginx" });
+    const list_path_selector = try typed.pathForList(null, .{ .labelSelector = "app=nginx" });
     defer allocator.free(list_path_selector);
     try std.testing.expectEqualStrings("/api/v1/pods?labelSelector=app=nginx", list_path_selector);
+}
+
+test "TypedClient subresource path building" {
+    const TestResource = struct {};
+    const TestResourceList = struct {};
+
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+
+    var client = try Client.init(io, allocator, .{
+        .host = "https://localhost:6443",
+    });
+    defer client.deinit();
+
+    const typed = TypedClient(TestResource, TestResourceList){
+        .client = &client,
+        .info = .{
+            .api_version = "v1",
+            .api_group = "",
+            .plural = "services",
+            .namespaced = true,
+        },
+    };
+
+    const status_path = try typed.pathForGetSubresource("default", "my-svc", "status");
+    defer allocator.free(status_path);
+    try std.testing.expectEqualStrings("/api/v1/namespaces/default/services/my-svc/status", status_path);
+
+    const scale_path = try typed.pathForPatchSubresource("default", "my-svc", "scale", .{});
+    defer allocator.free(scale_path);
+    try std.testing.expectEqualStrings("/api/v1/namespaces/default/services/my-svc/scale", scale_path);
 }
 
 test "TypedClient apps group resource" {
@@ -429,7 +511,6 @@ test "TypedClient apps group resource" {
 
     const typed = TypedClient(Deployment, DeploymentList){
         .client = &client,
-        .namespace = "default",
         .info = .{
             .api_version = "v1",
             .api_group = "apps",
@@ -438,7 +519,7 @@ test "TypedClient apps group resource" {
         },
     };
 
-    const path = try typed.pathForGet("nginx");
+    const path = try typed.pathForGet("default", "nginx");
     defer allocator.free(path);
     try std.testing.expectEqualStrings("/apis/apps/v1/namespaces/default/deployments/nginx", path);
 }

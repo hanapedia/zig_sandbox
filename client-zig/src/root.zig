@@ -26,7 +26,7 @@
 //!     defer client.deinit();
 //!
 //!     // List pods
-//!     const pods = try k8s.pods(&client, "default").list(.{});
+//!     const pods = try k8s.pods(&client).list("default", .{});
 //!     defer pods.deinit();
 //!
 //!     for (pods.value.items.items) |pod| {
@@ -143,43 +143,43 @@ pub const resource_info = struct {
 // Convenience functions for creating typed clients
 
 /// Create a typed client for Pod resources.
-pub fn pods(c: *Client, namespace: ?[]const u8) TypedClient(Pod, PodList) {
-    return .{ .client = c, .namespace = namespace, .info = resource_info.pod };
+pub fn pods(c: *Client) TypedClient(Pod, PodList) {
+    return .{ .client = c, .info = resource_info.pod };
 }
 
 /// Create a typed client for Service resources.
-pub fn services(c: *Client, namespace: ?[]const u8) TypedClient(Service, ServiceList) {
-    return .{ .client = c, .namespace = namespace, .info = resource_info.service };
+pub fn services(c: *Client) TypedClient(Service, ServiceList) {
+    return .{ .client = c, .info = resource_info.service };
 }
 
 /// Create a typed client for ConfigMap resources.
-pub fn configMaps(c: *Client, namespace: ?[]const u8) TypedClient(ConfigMap, ConfigMapList) {
-    return .{ .client = c, .namespace = namespace, .info = resource_info.configmap };
+pub fn configMaps(c: *Client) TypedClient(ConfigMap, ConfigMapList) {
+    return .{ .client = c, .info = resource_info.configmap };
 }
 
 /// Create a typed client for Secret resources.
-pub fn secrets(c: *Client, namespace: ?[]const u8) TypedClient(Secret, SecretList) {
-    return .{ .client = c, .namespace = namespace, .info = resource_info.secret };
+pub fn secrets(c: *Client) TypedClient(Secret, SecretList) {
+    return .{ .client = c, .info = resource_info.secret };
 }
 
 /// Create a typed client for Namespace resources (cluster-scoped).
 pub fn namespaces(c: *Client) TypedClient(Namespace, NamespaceList) {
-    return .{ .client = c, .namespace = null, .info = resource_info.namespace };
+    return .{ .client = c, .info = resource_info.namespace };
 }
 
 /// Create a typed client for Node resources (cluster-scoped).
 pub fn nodes(c: *Client) TypedClient(Node, NodeList) {
-    return .{ .client = c, .namespace = null, .info = resource_info.node };
+    return .{ .client = c, .info = resource_info.node };
 }
 
 /// Create a typed client for Deployment resources.
-pub fn deployments(c: *Client, namespace: ?[]const u8) TypedClient(Deployment, DeploymentList) {
-    return .{ .client = c, .namespace = namespace, .info = resource_info.deployment };
+pub fn deployments(c: *Client) TypedClient(Deployment, DeploymentList) {
+    return .{ .client = c, .info = resource_info.deployment };
 }
 
 /// Create a typed client for Job resources.
-pub fn jobs(c: *Client, namespace: ?[]const u8) TypedClient(Job, JobList) {
-    return .{ .client = c, .namespace = namespace, .info = resource_info.job };
+pub fn jobs(c: *Client) TypedClient(Job, JobList) {
+    return .{ .client = c, .info = resource_info.job };
 }
 
 test {

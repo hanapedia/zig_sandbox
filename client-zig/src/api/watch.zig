@@ -185,7 +185,7 @@ pub const WatchStream = struct {
         content_type: ContentType,
     ) !Self {
         // 1. Build the watch URL path
-        const path = try info.buildPath(client.allocator, namespace, null, .{ .watch = options });
+        const path = try info.buildPath(client.allocator, namespace, null, null, .{ .watch = options });
         defer client.allocator.free(path);
 
         // 2. Establish TCP connection
