@@ -3,7 +3,7 @@
 const std = @import("std");
 const watcher = @import("watch.zig");
 const Client = @import("../client/Client.zig").Client;
-const Status = @import("../proto/mod.zig").Status;
+const Status = @import("../proto/mod.zig").metav1.Status;
 
 /// ResourceInfo describes the API path information for a Kubernetes resource.
 pub const ResourceInfo = struct {

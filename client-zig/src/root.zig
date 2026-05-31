@@ -65,28 +65,11 @@ pub const EventType = api.EventType;
 pub const ListerWatcher = api.ListerWatcher;
 pub const EventQueue = api.EventQueue;
 
-// Re-export proto types for convenience
-pub const Pod = proto.Pod;
-pub const PodList = proto.PodList;
-pub const PodSpec = proto.PodSpec;
-pub const PodStatus = proto.PodStatus;
-pub const Service = proto.Service;
-pub const ServiceList = proto.ServiceList;
-pub const ConfigMap = proto.ConfigMap;
-pub const ConfigMapList = proto.ConfigMapList;
-pub const Secret = proto.Secret;
-pub const SecretList = proto.SecretList;
-pub const Namespace = proto.Namespace;
-pub const NamespaceList = proto.NamespaceList;
-pub const Node = proto.Node;
-pub const NodeList = proto.NodeList;
-pub const Deployment = proto.Deployment;
-pub const DeploymentList = proto.DeploymentList;
-pub const Job = proto.Job;
-pub const JobList = proto.JobList;
-pub const ObjectMeta = proto.ObjectMeta;
-pub const ListMeta = proto.ListMeta;
-pub const Status = proto.Status;
+// Proto API group exports
+pub const v1 = proto.v1;
+pub const appsv1 = proto.appsv1;
+pub const batchv1 = proto.batchv1;
+pub const metav1 = proto.metav1;
 
 // Resource info definitions for core v1 resources
 pub const resource_info = struct {
@@ -143,42 +126,42 @@ pub const resource_info = struct {
 // Convenience functions for creating typed clients
 
 /// Create a typed client for Pod resources.
-pub fn pods(c: *Client) TypedClient(Pod, PodList) {
+pub fn pods(c: *Client) TypedClient(v1.Pod, v1.PodList) {
     return .{ .client = c, .info = resource_info.pod };
 }
 
 /// Create a typed client for Service resources.
-pub fn services(c: *Client) TypedClient(Service, ServiceList) {
+pub fn services(c: *Client) TypedClient(v1.Service, v1.ServiceList) {
     return .{ .client = c, .info = resource_info.service };
 }
 
 /// Create a typed client for ConfigMap resources.
-pub fn configMaps(c: *Client) TypedClient(ConfigMap, ConfigMapList) {
+pub fn configMaps(c: *Client) TypedClient(v1.ConfigMap, v1.ConfigMapList) {
     return .{ .client = c, .info = resource_info.configmap };
 }
 
 /// Create a typed client for Secret resources.
-pub fn secrets(c: *Client) TypedClient(Secret, SecretList) {
+pub fn secrets(c: *Client) TypedClient(v1.Secret, v1.SecretList) {
     return .{ .client = c, .info = resource_info.secret };
 }
 
 /// Create a typed client for Namespace resources (cluster-scoped).
-pub fn namespaces(c: *Client) TypedClient(Namespace, NamespaceList) {
+pub fn namespaces(c: *Client) TypedClient(v1.Namespace, v1.NamespaceList) {
     return .{ .client = c, .info = resource_info.namespace };
 }
 
 /// Create a typed client for Node resources (cluster-scoped).
-pub fn nodes(c: *Client) TypedClient(Node, NodeList) {
+pub fn nodes(c: *Client) TypedClient(v1.Node, v1.NodeList) {
     return .{ .client = c, .info = resource_info.node };
 }
 
 /// Create a typed client for Deployment resources.
-pub fn deployments(c: *Client) TypedClient(Deployment, DeploymentList) {
+pub fn deployments(c: *Client) TypedClient(appsv1.Deployment, appsv1.DeploymentList) {
     return .{ .client = c, .info = resource_info.deployment };
 }
 
 /// Create a typed client for Job resources.
-pub fn jobs(c: *Client) TypedClient(Job, JobList) {
+pub fn jobs(c: *Client) TypedClient(batchv1.Job, batchv1.JobList) {
     return .{ .client = c, .info = resource_info.job };
 }
 
