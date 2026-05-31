@@ -61,6 +61,10 @@ pub const WatchOptions = api.WatchOptions;
 pub const WatchEvent = api.WatchEvent;
 pub const EventType = api.EventType;
 
+// ListerWatcher
+pub const ListerWatcher = api.ListerWatcher;
+pub const EventQueue = api.EventQueue;
+
 // Re-export proto types for convenience
 pub const Pod = proto.Pod;
 pub const PodList = proto.PodList;

@@ -38,7 +38,7 @@ pub const Config = struct {
     namespace: ?[]const u8,
     source: enum { kubeconfig, in_cluster },
 
-    fn deinit(self: *Config) void {
+    pub fn deinit(self: *Config) void {
         self.allocator.free(self.host);
         if (self.token) |t| self.allocator.free(t);
         if (self.ca_cert) |c| self.allocator.free(c);
