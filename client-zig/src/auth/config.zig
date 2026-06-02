@@ -5,6 +5,7 @@ const in_cluster = @import("in_cluster.zig");
 pub fn loadConfig(io: std.Io, environ_map: *std.process.Environ.Map, allocator: std.mem.Allocator) !Config {
     // Try kubeconfig first, fall back to in-cluster config
     if (kubeconfig.load(io, environ_map, allocator, null)) |cfg| {
+        std.debug.print("using kubeconfig\n", .{});
         return .{
             .allocator = allocator,
             .host = cfg.host,
@@ -17,6 +18,7 @@ pub fn loadConfig(io: std.Io, environ_map: *std.process.Environ.Map, allocator: 
     } else |_| {
         // Fall back to in-cluster config
         const in_cluster_config = try in_cluster.InClusterConfig.load(io, environ_map, allocator);
+        std.debug.print("using incluster config. host={s}\n", .{in_cluster_config.host});
         return .{
             .allocator = allocator,
             .host = in_cluster_config.host,

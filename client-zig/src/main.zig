@@ -67,7 +67,7 @@ pub fn main(init: std.process.Init) !void {
 }
 
 fn listNamespaces(client: *k8s.Client) !void {
-    var result = try k8s.namespaces(client).list(.{});
+    var result = try k8s.namespaces(client).list(null, .{});
     defer result.deinit();
 
     if (result.value.items.items.len == 0) {
@@ -83,7 +83,7 @@ fn listNamespaces(client: *k8s.Client) !void {
 }
 
 fn listPods(client: *k8s.Client, namespace: []const u8) !void {
-    var result = try k8s.pods(client, namespace).list(.{});
+    var result = try k8s.pods(client).list(namespace, .{});
     defer result.deinit();
 
     if (result.value.items.items.len == 0) {
@@ -100,7 +100,7 @@ fn listPods(client: *k8s.Client, namespace: []const u8) !void {
 }
 
 fn listServices(client: *k8s.Client, namespace: []const u8) !void {
-    var result = try k8s.services(client, namespace).list(.{});
+    var result = try k8s.services(client).list(namespace, .{});
     defer result.deinit();
 
     if (result.value.items.items.len == 0) {
@@ -120,7 +120,7 @@ fn listServices(client: *k8s.Client, namespace: []const u8) !void {
 /// This demonstrates the iterator-style usage pattern.
 fn watchPods(client: *k8s.Client, namespace: []const u8) !void {
     // Create a typed watcher for Pods
-    var watcher = try k8s.Watcher(k8s.Pod).init(
+    var watcher = try k8s.Watcher(k8s.v1.Pod).init(
         client,
         namespace,
         k8s.resource_info.pod,
@@ -190,10 +190,10 @@ fn createConfigMap(
     allocator: std.mem.Allocator,
     namespace: []const u8,
     name: []const u8,
-) !k8s.Client.ProtoResult(k8s.ConfigMap) {
+) !k8s.Client.ProtoResult(k8s.v1.ConfigMap) {
     // Build the ConfigMap
-    var cm = k8s.ConfigMap{
-        .metadata = k8s.ObjectMeta{
+    var cm = k8s.v1.ConfigMap{
+        .metadata = k8s.metav1.ObjectMeta{
             .name = name,
             .namespace = namespace,
         },
@@ -204,7 +204,7 @@ fn createConfigMap(
     try cm.data.append(allocator, .{ .key = "key2", .value = "value2" });
     defer cm.data.deinit(allocator);
 
-    return k8s.configMaps(client, namespace).create(cm, .{});
+    return k8s.configMaps(client).create(namespace, cm, .{});
 }
 
 /// Update a ConfigMap with new data.
@@ -213,11 +213,11 @@ fn updateConfigMap(
     allocator: std.mem.Allocator,
     namespace: []const u8,
     name: []const u8,
-    existing: k8s.ConfigMap,
-) !k8s.Client.ProtoResult(k8s.ConfigMap) {
+    existing: k8s.v1.ConfigMap,
+) !k8s.Client.ProtoResult(k8s.v1.ConfigMap) {
     // Copy existing and modify
-    var cm = k8s.ConfigMap{
-        .metadata = k8s.ObjectMeta{
+    var cm = k8s.v1.ConfigMap{
+        .metadata = k8s.metav1.ObjectMeta{
             .name = name,
             .namespace = namespace,
             // Must include resourceVersion for update
@@ -230,12 +230,12 @@ fn updateConfigMap(
     try cm.data.append(allocator, .{ .key = "key3", .value = "new-value3" });
     defer cm.data.deinit(allocator);
 
-    return k8s.configMaps(client, namespace).update(name, cm, .{});
+    return k8s.configMaps(client).update(namespace, name, cm, .{});
 }
 
 /// Delete a ConfigMap by name.
 fn deleteConfigMap(client: *k8s.Client, namespace: []const u8, name: []const u8) !void {
-    var result = try k8s.configMaps(client, namespace).delete(name, .{});
+    var result = try k8s.configMaps(client).delete(namespace, name, .{});
     defer result.deinit();
     // result.value is a Status object
     const status = if (result.value.status) |s| s else "Success";

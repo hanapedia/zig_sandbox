@@ -71,14 +71,17 @@ pub fn ListerWatcher(comptime T: type, comptime L: type) type {
         allocator: std.mem.Allocator,
         io: std.Io,
 
+        namespace: ?[]const u8 = null,
+
         typed_client: typed.TypedClient(T, L),
         // not owned
         fifo: *EventQueue(T),
 
-        pub fn init(allocator: std.mem.Allocator, io: std.Io, client: typed.TypedClient(T, L), fifo: *EventQueue(T)) ListerWatcher(T, L) {
+        pub fn init(allocator: std.mem.Allocator, io: std.Io, namespace: ?[]const u8, client: typed.TypedClient(T, L), fifo: *EventQueue(T)) ListerWatcher(T, L) {
             return .{
                 .allocator = allocator,
                 .io = io,
+                .namespace = namespace,
                 .typed_client = client,
                 .fifo = fifo,
             };
@@ -93,7 +96,7 @@ pub fn ListerWatcher(comptime T: type, comptime L: type) type {
         }
 
         fn run(self: Self) !void {
-            var result = try self.typed_client.list(.{});
+            var result = try self.typed_client.list(self.namespace, .{});
             defer result.deinit();
             // must be list result
             for (result.value.items.items) |t| { // value.items must be std.ArrayList(T)
@@ -106,7 +109,7 @@ pub fn ListerWatcher(comptime T: type, comptime L: type) type {
             const metadata: metav1.ListMeta = result.value.metadata orelse return error.NoMetadata;
             const rv: []const u8 = metadata.resourceVersion orelse return error.NoResourceVersion;
 
-            var watcher: watch.Watcher(T) = try self.typed_client.watch(.{ .resourceVersion = rv });
+            var watcher: watch.Watcher(T) = try self.typed_client.watch(self.namespace, .{ .resourceVersion = rv });
             defer watcher.deinit();
 
             while (try watcher.next()) |event_val| {
