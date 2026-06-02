@@ -1,0 +1,66 @@
+version: '3'
+
+vars:
+  OPERATOR_IMAGE_NAME: ziglb-operator
+  IMAGE_TAG: latest
+  NAMESPACE: default
+  K8S_VERSION: "1.33"
+  PROTO_DIR: proto
+
+tasks:
+  build:
+    desc: Build the Zig binary
+    cmds:
+      - zig build -Doptimize=ReleaseSafe
+
+  test:
+    desc: Run tests
+    cmds:
+      - zig build test
+
+  # Container image tasks
+  image:build:
+    desc: Build container image using docker
+    cmds:
+      - docker build -t {{.OPERATOR_IMAGE_NAME}}:{{.IMAGE_TAG}} -f Dockerfile ..
+
+  image:load:
+    desc: Load image into kind cluster
+    deps: [image:build]
+    cmds:
+      - kind load docker-image {{.OPERATOR_IMAGE_NAME}}:{{.IMAGE_TAG}} --name ziglb
+
+  # Kubernetes deployment tasks
+  k8s:deploy:
+    desc: Deploy to Kubernetes (creates SA, RBAC, and Pod)
+    cmds:
+      - kubectl apply -f config/rbac.yaml
+      - kubectl apply -f config/ziglb-operator.yaml
+
+  k8s:delete:
+    desc: Delete Kubernetes resources
+    cmds:
+      - kubectl delete -f config/ziglb-operator.yaml --ignore-not-found
+      - kubectl delete -f config/rbac.yaml --ignore-not-found
+
+  k8s:redeploy:
+    desc: Rebuild, reload image, and redeploy
+    cmds:
+      - task: k8s:delete
+      - task: image:load
+      - task: k8s:deploy
+
+  clean:
+    desc: Clean build artifacts
+    cmds:
+      - rm -rf zig-out .zig-cache
+
+  kind:start:
+    desc: start kind cluster
+    cmds:
+      - kind create cluster --config config/kind-config.yaml --name ziglb
+
+  kind:stop:
+    desc: stop kind cluster
+    cmds:
+      - kind delete cluster --name ziglb

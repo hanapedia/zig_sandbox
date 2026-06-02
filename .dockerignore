@@ -1,0 +1,19 @@
+# Exclude everything by default, then whitelist what's needed
+**
+
+# Build sources
+!client-zig/
+!zigbgp/
+!ziglb/
+
+# Exclude build artifacts and caches within those directories
+**/.zig-cache/
+**/zig-out/
+
+# Exclude Nix-related files
+flake.nix
+flake.lock
+
+# Exclude Git metadata
+.git/
+.gitignore

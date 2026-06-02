@@ -10,6 +10,9 @@ pub fn build(b: *std.Build) void {
     const zigbgp_dep = b.dependency("zigbgp", .{ .target = target, .optimize = optimize });
     const zigbgp_mod = zigbgp_dep.module("zigbgp");
 
+    const zio_dep = b.dependency("zio", .{ .target = target, .optimize = optimize });
+    const zio_mod = zio_dep.module("zio");
+
     const operator_opts = std.Build.ExecutableOptions{
         .name = "ziglb-operator",
         .root_module = b.createModule(.{
@@ -18,6 +21,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "client_zig", .module = client_zig_mod },
+                .{ .name = "zio", .module = zio_mod },
             },
         }),
     };

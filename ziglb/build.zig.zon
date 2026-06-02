@@ -34,6 +34,10 @@
     .dependencies = .{
         .client_zig = .{ .path = "../client-zig" },
         .zigbgp = .{ .path = "../zigbgp" },
+        .zio = .{
+            .url = "git+https://github.com/lalinsky/zio.git?ref=v0.13.0#c0382d00beed1b44d2ab412fda23574252a31332",
+            .hash = "zio-0.13.0-xHbVVL0jHQB0ZCuiXhi5YiBl5lKIXwrCjcmWeQfy3Jsh",
+        },
     },
     // Specifies the set of files and directories that are included in this package.
     // Only files and directories listed here are included in the `hash` that
