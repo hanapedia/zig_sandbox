@@ -56,7 +56,15 @@ pub const Speaker = struct {
         }
     }
 
-    pub fn start(self: *Self) !void {
+    pub fn start(self: *Self) std.Io.Cancelable!void {
+        std.debug.print("Speaker started.\n", .{});
+        self.run() catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => std.debug.print("Speaker error: {}\n", .{err}),
+        };
+    }
+
+    pub fn run(self: *Self) !void {
         const address = try std.Io.net.IpAddress.parseIp4("0.0.0.0", self.cfg.listen_port);
         self.server = try address.listen(self.io, .{
             .reuse_address = true,
