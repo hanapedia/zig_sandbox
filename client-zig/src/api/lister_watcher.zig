@@ -89,6 +89,7 @@ pub fn ListerWatcher(comptime T: type, comptime L: type) type {
 
         // starts lister watcher, where
         pub fn start(self: Self) std.Io.Cancelable!void {
+            std.debug.print("ListerWatcher started.\n", .{});
             self.run() catch |err| switch (err) {
                 error.Canceled => return error.Canceled,
                 else => std.debug.print("ListerWatcher error: {}\n", .{err}),

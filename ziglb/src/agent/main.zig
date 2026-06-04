@@ -52,7 +52,7 @@ pub fn main(init: std.process.Init) !void {
         &event_queue,
     );
 
-    var speaker = try bgp.Speaker.init(allocator, init.io, .{
+    var speaker = try bgp.Speaker.init(allocator, io, .{
         .as_number = 65001,
         .router_id = .{ 10, 0, 0, 1 },
         .listen_port = 179,
