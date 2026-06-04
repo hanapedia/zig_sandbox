@@ -17,8 +17,3 @@ spec:
         - name: ziglb-operator
           image: ziglb-operator:latest
           imagePullPolicy: Never
-          resources:
-            limits:
-              cpu: 2
-            requests:
-              cpu: 2

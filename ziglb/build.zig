@@ -38,6 +38,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "client_zig", .module = client_zig_mod },
                 .{ .name = "zigbgp", .module = zigbgp_mod },
+                .{ .name = "zio", .module = zio_mod },
             },
         }),
     };

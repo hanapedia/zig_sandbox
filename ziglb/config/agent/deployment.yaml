@@ -1,0 +1,37 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ziglb-agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ziglb-agent
+  template:
+    metadata:
+      labels:
+        app: ziglb-agent
+    spec:
+      serviceAccountName: ziglb-agent
+      containers:
+        - name: ziglb-agent
+          image: ziglb-agent:latest
+          imagePullPolicy: Never
+      volumes:
+        - name: gobgpd-config
+          configMap:
+            name: gobgpd-config
+      initContainers:
+        - name: gobgp
+          image: gobgp:latest
+          imagePullPolicy: Never
+          restartPolicy: Always
+          volumeMounts:
+            - name: gobgpd-config
+              mountPath: /etc/gobgpd
+              readOnly: true
+          startupProbe:
+            tcpSocket:
+              port: 1790
+            initialDelaySeconds: 10
+            periodSeconds: 5

@@ -1,0 +1,32 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ziglb-agent
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ziglb-agent
+rules:
+  # Core resources - read only
+  - apiGroups: [""]
+    resources:
+      - services
+    verbs: ["get", "list", "watch", "create", "update", "delete", "patch"]
+  - apiGroups: [""]
+    resources:
+      - services/status
+    verbs: ["get", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ziglb-agent
+subjects:
+  - kind: ServiceAccount
+    name: ziglb-agent
+    namespace: default
+roleRef:
+  kind: ClusterRole
+  name: ziglb-agent
+  apiGroup: rbac.authorization.k8s.io

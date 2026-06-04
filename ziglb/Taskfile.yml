@@ -2,10 +2,11 @@ version: '3'
 
 vars:
   OPERATOR_IMAGE_NAME: ziglb-operator
+  AGENT_IMAGE_NAME: ziglb-agent
+  GOBGP_IMAGE_NAME: gobgp
   IMAGE_TAG: latest
   NAMESPACE: default
   K8S_VERSION: "1.33"
-  PROTO_DIR: proto
 
 tasks:
   build:
@@ -18,30 +19,67 @@ tasks:
     cmds:
       - zig build test
 
-  # Container image tasks
   image:build:
     desc: Build container image using docker
     cmds:
-      - docker build -t {{.OPERATOR_IMAGE_NAME}}:{{.IMAGE_TAG}} -f Dockerfile ..
+      - task image:operator:build
+      - task image:agent:build
+      - task image:gobgp:build
 
   image:load:
     desc: Load image into kind cluster
     deps: [image:build]
     cmds:
+      - task image:operator:load
+      - task image:agent:load
+      - task image:gobgp:load
+
+  # Container image tasks
+  image:operator:build:
+    desc: Build operator container image using docker
+    cmds:
+      - docker build -t {{.OPERATOR_IMAGE_NAME}}:{{.IMAGE_TAG}} -f operator.Dockerfile ..
+
+  image:operator:load:
+    desc: Load operator image into kind cluster
+    deps: [image:operator:build]
+    cmds:
       - kind load docker-image {{.OPERATOR_IMAGE_NAME}}:{{.IMAGE_TAG}} --name ziglb
+
+  image:agent:build:
+    desc: Build agent container image using docker
+    cmds:
+      - docker build -t {{.AGENT_IMAGE_NAME}}:{{.IMAGE_TAG}} -f agent.Dockerfile ..
+
+  image:agent:load:
+    desc: Load agent image into kind cluster
+    deps: [image:agent:build]
+    cmds:
+      - kind load docker-image {{.AGENT_IMAGE_NAME}}:{{.IMAGE_TAG}} --name ziglb
+
+  image:gobgp:build:
+    desc: Build gobgp container image using docker
+    cmds:
+      - docker build -t {{.GOBGP_IMAGE_NAME}}:{{.IMAGE_TAG}} -f gobgp.Dockerfile ..
+
+  image:gobgp:load:
+    desc: Load gobgp image into kind cluster
+    deps: [image:gobgp:build]
+    cmds:
+      - kind load docker-image {{.GOBGP_IMAGE_NAME}}:{{.IMAGE_TAG}} --name ziglb
 
   # Kubernetes deployment tasks
   k8s:deploy:
-    desc: Deploy to Kubernetes (creates SA, RBAC, and Pod)
+    desc: Deploy to Kubernetes
     cmds:
-      - kubectl apply -f config/rbac.yaml
-      - kubectl apply -f config/ziglb-operator.yaml
+      - kustomize build config/operator | kubectl apply -f -
+      - kustomize build config/agent | kubectl apply -f -
 
   k8s:delete:
     desc: Delete Kubernetes resources
     cmds:
-      - kubectl delete -f config/ziglb-operator.yaml --ignore-not-found
-      - kubectl delete -f config/rbac.yaml --ignore-not-found
+      - kustomize build config/operator | kubectl delete -f -
+      - kustomize build config/agent | kubectl delete -f -
 
   k8s:redeploy:
     desc: Rebuild, reload image, and redeploy
