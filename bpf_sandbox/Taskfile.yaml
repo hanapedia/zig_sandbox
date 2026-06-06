@@ -1,0 +1,21 @@
+version: '3'
+
+vars:
+  IMAGE_NAME: bpf-sandbox
+  COMPILER_IMAGE_NAME: alpine-zig-compiler
+
+tasks:
+  build:
+    desc: Build the zigbgp binary
+    cmds:
+      - docker run --rm -v "$(pwd)":/workspace -w /workspace {{.COMPILER_IMAGE_NAME}} zig build --summary all --verbose
+
+  build:image:
+    desc: Build the image
+    cmds:
+      - docker build -t {{.IMAGE_NAME}} -f Dockerfile .
+
+  build:compiler-image:
+    desc: Build the zig compiler image
+    cmds:
+      - docker build -t {{.COMPILER_IMAGE_NAME}} -f compiler.Dockerfile .
