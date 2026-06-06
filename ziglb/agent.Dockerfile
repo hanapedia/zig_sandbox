@@ -13,7 +13,8 @@ COPY zigbgp/ zigbgp/
 COPY ziglb/ ziglb/
 
 WORKDIR /build/ziglb
-RUN zig build -Doptimize=ReleaseSafe
+RUN --mount=type=cache,target=/root/.cache/zig \
+    zig build -Doptimize=ReleaseSafe
 
 FROM debian:bookworm-20250520-slim
 

@@ -78,8 +78,8 @@ tasks:
   k8s:delete:
     desc: Delete Kubernetes resources
     cmds:
-      - kustomize build config/operator | kubectl delete -f -
-      - kustomize build config/agent | kubectl delete -f -
+      - kustomize build config/operator | kubectl delete --ignore-not-found -f -
+      - kustomize build config/agent | kubectl delete --ignore-not-found -f -
 
   k8s:redeploy:
     desc: Rebuild, reload image, and redeploy
