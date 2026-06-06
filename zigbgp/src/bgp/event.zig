@@ -5,11 +5,29 @@ pub const DEFAULT_QUEUE_SIZE: usize = 10;
 
 pub const DeinitError = error{QueueNotDrained};
 
-pub const Error = std.Io.QueueClosedError || std.Io.Cancelable;
+pub const Error = std.Io.QueueClosedError || std.Io.Cancelable || std.mem.Allocator.Error;
 
+/// producer of the event must init and consumer must deinit.
 pub const RouteEvent = struct {
+    allocator: std.mem.Allocator,
+
     announce: []prefix.V4Prefix,
     withdraw: []prefix.V4Prefix,
+
+    /// Copies announce and withdraw so the memory management can be decoupled
+    /// between producer and consumer of the event.
+    pub fn init(allocator: std.mem.Allocator, announce: []prefix.V4Prefix, withdraw: []prefix.V4Prefix) !RouteEvent {
+        return .{
+            .allocator = allocator,
+            .announce = try allocator.dupe(prefix.V4Prefix, announce),
+            .withdraw = try allocator.dupe(prefix.V4Prefix, withdraw),
+        };
+    }
+
+    pub fn deinit(self: *RouteEvent) void {
+        self.allocator.free(self.announce);
+        self.allocator.free(self.withdraw);
+    }
 };
 
 pub const RouteEventQueue = struct {

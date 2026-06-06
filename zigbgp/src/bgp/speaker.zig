@@ -45,14 +45,18 @@ pub const Speaker = struct {
     }
 
     pub fn announce(self: *Self, px: []prefix.V4Prefix) event.Error!void {
+        // we do not own px.
         for (self.peers.items) |p| {
-            try p.route_event_queue.enqueue(.{ .announce = px, .withdraw = &.{} });
+            const route_event = try event.RouteEvent.init(self.allocator, px, &.{});
+            try p.route_event_queue.enqueue(route_event);
         }
     }
 
     pub fn withdraw(self: *Self, px: []prefix.V4Prefix) event.Error!void {
+        // we do not own px.
         for (self.peers.items) |p| {
-            try p.route_event_queue.enqueue(.{ .withdraw = px, .announce = &.{} });
+            const route_event = try event.RouteEvent.init(self.allocator, &.{}, px);
+            try p.route_event_queue.enqueue(route_event);
         }
     }
 

@@ -165,7 +165,8 @@ pub const Peer = struct {
                     // do nothing. checkTimers in the next iteration will handle timeout
                 },
                 .route_event => |re| {
-                    const r = try re;
+                    var r = try re;
+                    defer r.deinit();
                     _ = try self.writeMessage(&writer.interface, .{
                         .update = .{
                             .withdrawn = r.withdraw,

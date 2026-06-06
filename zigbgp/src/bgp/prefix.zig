@@ -17,6 +17,7 @@ pub const V4Prefix = struct {
     /// Number of prefix bytes on the wire.
     /// This is required since only significant bits of the prefix are encoded.
     pub fn octetsNeeded(self: V4Prefix) u8 {
+        std.debug.print("len: {}\n", .{self.len});
         return std.math.divCeil(u8, self.len, 8) catch unreachable;
     }
 
@@ -40,6 +41,7 @@ pub const V4Prefix = struct {
         const octets_needed = self.octetsNeeded();
         if (buf.len < V4_PREFIX_LENGTH_LEN + octets_needed) return error.BufferTooSmall;
         buf[0] = self.len;
+        std.debug.print("octets_needed: {}\n", .{octets_needed});
         @memcpy(buf[V4_PREFIX_LENGTH_LEN .. V4_PREFIX_LENGTH_LEN + octets_needed], self.addr[0..octets_needed]);
         return V4_PREFIX_LENGTH_LEN + octets_needed;
     }
