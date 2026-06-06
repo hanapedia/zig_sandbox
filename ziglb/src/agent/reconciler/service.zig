@@ -93,9 +93,11 @@ pub const ServiceReconciler = struct {
         for (lb_ingress) |lbi| {
             if (lbi.ip) |p| {
                 const addr = try std.Io.net.Ip4Address.parse(p, 0);
-                try prefixes.append(self.allocator, bgp.Prefix{ .len = 32, .addr = addr.bytes });
+                std.debug.print("announcing: {s}\n", .{ p });
+                try prefixes.append(self.allocator, bgp.Prefix{ .addr = addr.bytes, .len = 32 });
             }
         }
+
         try self.bgp_speaker.announce(prefixes.items); // can block
     }
 };
