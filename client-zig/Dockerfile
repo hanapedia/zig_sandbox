@@ -1,4 +1,4 @@
-FROM alpine:3.19
+FROM alpine:3.23.4
 
 # Add ca-certificates for HTTPS (in-cluster uses HTTPS)
 RUN apk add --no-cache ca-certificates
