@@ -1,0 +1,12 @@
+.{
+    .name = .zig_http_server,
+    .version = "0.16.0",
+    .dependencies = .{
+        .zio = .{
+            .url = "git+https://github.com/lalinsky/zio.git?ref=v0.13.0#c0382d00beed1b44d2ab412fda23574252a31332",
+            .hash = "zio-0.13.0-xHbVVL0jHQB0ZCuiXhi5YiBl5lKIXwrCjcmWeQfy3Jsh",
+        },
+    },
+    .paths = .{""},
+    .fingerprint = 0x83fc71923bf9882c,
+}

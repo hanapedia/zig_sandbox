@@ -1,0 +1,16 @@
+version: '3'
+
+vars:
+  HTTP_SERVER_IMAGE_NAME: zig-http-server
+  IMAGE_TAG: latest
+
+tasks:
+  build:
+    desc: Build the Zig binary
+    cmds:
+      - zig build -Doptimize=ReleaseSafe
+
+  image:build:
+    desc: Build container image using docker
+    cmds:
+      - docker build -t {{.HTTP_SERVER_IMAGE_NAME}}:{{.IMAGE_TAG}} -f Dockerfile .
