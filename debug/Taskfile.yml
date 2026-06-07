@@ -1,0 +1,11 @@
+version: '3'
+
+vars:
+  DEBUG_IMAGE_NAME: alpine-debug
+  IMAGE_TAG: latest
+
+tasks:
+  build:
+    desc: Build container image using docker
+    cmds:
+      - docker build -t {{.DEBUG_IMAGE_NAME}}:{{.IMAGE_TAG}} -f Dockerfile .
