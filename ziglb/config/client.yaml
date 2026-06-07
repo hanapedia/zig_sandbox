@@ -1,0 +1,23 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: http-client
+  labels:
+    app.kubernetes.io/name: http-client
+spec:
+  restartPolicy: Never
+  nodeSelector:
+    kubernetes.io/hostname: ziglb-worker
+  terminationGracePeriodSeconds: 1
+  containers:
+    - name: client
+      image: alpine-debug:latest
+      imagePullPolicy: Never
+      command:
+        - sh
+        - -c
+        - |
+          while true; do
+            curl -sS -w "\n" http://lb.default.svc.cluster.local 2>&1
+            sleep 1
+          done

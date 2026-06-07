@@ -1,6 +1,6 @@
-FROM debian:bookworm-20250520-slim AS builder
+FROM alpine:3.23.4 AS builder
 
-RUN apt-get update && apt-get install -y --no-install-recommends curl xz-utils ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN apk add --no-cache curl xz ca-certificates
 
 RUN curl -fsSL https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz | tar -xJ -C /usr/local && \
     ln -s /usr/local/zig-x86_64-linux-0.16.0/zig /usr/local/bin/zig
@@ -16,16 +16,16 @@ WORKDIR /build/ziglb
 RUN --mount=type=cache,target=/root/.cache/zig \
     zig build -Doptimize=ReleaseSafe
 
-FROM debian:bookworm-20250520-slim
+FROM alpine:3.23.4
 
 # Add ca-certificates for HTTPS (in-cluster uses HTTPS)
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN apk add --no-cache ca-certificates
 
 # Copy the built binary
 COPY --from=builder /build/ziglb/zig-out/bin/ziglb-agent /usr/local/bin/ziglb-agent
 
 # Run as non-root
-RUN useradd -u 1000 -M appuser
+RUN adduser -D -u 1000 appuser
 USER appuser
 
 ENTRYPOINT ["/usr/local/bin/ziglb-agent"]

@@ -1,5 +1,13 @@
 version: '3'
 
+includes:
+  http_server: 
+    taskfile: ../zig_http_server/Taskfile.yml
+    dir: ../zig_http_server/
+  debug:
+    taskfile: ../debug/Taskfile.yml
+    dir: ../debug/
+
 vars:
   OPERATOR_IMAGE_NAME: ziglb-operator
   AGENT_IMAGE_NAME: ziglb-agent
@@ -7,6 +15,7 @@ vars:
   IMAGE_TAG: latest
   NAMESPACE: default
   K8S_VERSION: "1.33"
+  CLUSTER_NAME: ziglb
 
 tasks:
   build:
@@ -28,11 +37,12 @@ tasks:
 
   image:load:
     desc: Load image into kind cluster
-    deps: [image:build]
     cmds:
       - task image:operator:load
       - task image:agent:load
       - task image:gobgp:load
+      - task image:http_server:load
+      - task image:debug:load
 
   # Container image tasks
   image:operator:build:
@@ -44,7 +54,7 @@ tasks:
     desc: Load operator image into kind cluster
     deps: [image:operator:build]
     cmds:
-      - kind load docker-image {{.OPERATOR_IMAGE_NAME}}:{{.IMAGE_TAG}} --name ziglb
+      - kind load docker-image {{.OPERATOR_IMAGE_NAME}}:{{.IMAGE_TAG}} --name {{.CLUSTER_NAME}}
 
   image:agent:build:
     desc: Build agent container image using docker
@@ -55,7 +65,7 @@ tasks:
     desc: Load agent image into kind cluster
     deps: [image:agent:build]
     cmds:
-      - kind load docker-image {{.AGENT_IMAGE_NAME}}:{{.IMAGE_TAG}} --name ziglb
+      - kind load docker-image {{.AGENT_IMAGE_NAME}}:{{.IMAGE_TAG}} --name {{.CLUSTER_NAME}}
 
   image:gobgp:build:
     desc: Build gobgp container image using docker
@@ -66,7 +76,19 @@ tasks:
     desc: Load gobgp image into kind cluster
     deps: [image:gobgp:build]
     cmds:
-      - kind load docker-image {{.GOBGP_IMAGE_NAME}}:{{.IMAGE_TAG}} --name ziglb
+      - kind load docker-image {{.GOBGP_IMAGE_NAME}}:{{.IMAGE_TAG}} --name {{.CLUSTER_NAME}}
+
+  image:http_server:load:
+    desc: Load http_server image into kind cluster
+    deps: [http_server:image:build]
+    cmds:
+      - kind load docker-image {{.HTTP_SERVER_IMAGE_NAME}}:{{.IMAGE_TAG}} --name {{.CLUSTER_NAME}}
+
+  image:debug:load:
+    desc: Load debug image into kind cluster
+    deps: [debug:build]
+    cmds:
+      - kind load docker-image {{.DEBUG_IMAGE_NAME}}:{{.IMAGE_TAG}} --name {{.CLUSTER_NAME}}
 
   # Kubernetes deployment tasks
   k8s:deploy:
@@ -96,9 +118,10 @@ tasks:
   kind:start:
     desc: start kind cluster
     cmds:
-      - kind create cluster --config config/kind-config.yaml --name ziglb
+      - kind create cluster --config config/kind-config.yaml --name {{.CLUSTER_NAME}}
+      - kubectl taint nodes {{.CLUSTER_NAME}}-control-plane node-role.kubernetes.io/control-plane:NoSchedule-
 
   kind:stop:
     desc: stop kind cluster
     cmds:
-      - kind delete cluster --name ziglb
+      - kind delete cluster --name {{.CLUSTER_NAME}}
