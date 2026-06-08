@@ -7,6 +7,7 @@ RUN apk add --no-cache \
     iproute2 \
     tcpdump \
     busybox-extras \
+    bird \
     bash
 
 CMD ["bash"]
