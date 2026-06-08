@@ -11,7 +11,6 @@ includes:
 vars:
   OPERATOR_IMAGE_NAME: ziglb-operator
   AGENT_IMAGE_NAME: ziglb-agent
-  GOBGP_IMAGE_NAME: gobgp
   IMAGE_TAG: latest
   NAMESPACE: default
   K8S_VERSION: "1.33"
@@ -33,14 +32,12 @@ tasks:
     cmds:
       - task image:operator:build
       - task image:agent:build
-      - task image:gobgp:build
 
   image:load:
     desc: Load image into kind cluster
     cmds:
       - task image:operator:load
       - task image:agent:load
-      - task image:gobgp:load
       - task image:http_server:load
       - task image:debug:load
 
@@ -66,17 +63,6 @@ tasks:
     deps: [image:agent:build]
     cmds:
       - kind load docker-image {{.AGENT_IMAGE_NAME}}:{{.IMAGE_TAG}} --name {{.CLUSTER_NAME}}
-
-  image:gobgp:build:
-    desc: Build gobgp container image using docker
-    cmds:
-      - docker build -t {{.GOBGP_IMAGE_NAME}}:{{.IMAGE_TAG}} -f gobgp.Dockerfile ..
-
-  image:gobgp:load:
-    desc: Load gobgp image into kind cluster
-    deps: [image:gobgp:build]
-    cmds:
-      - kind load docker-image {{.GOBGP_IMAGE_NAME}}:{{.IMAGE_TAG}} --name {{.CLUSTER_NAME}}
 
   image:http_server:load:
     desc: Load http_server image into kind cluster
