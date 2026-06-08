@@ -1,9 +1,8 @@
 apiVersion: apps/v1
-kind: Deployment
+kind: DaemonSet
 metadata:
   name: ziglb-agent
 spec:
-  replicas: 1
   selector:
     matchLabels:
       app: ziglb-agent

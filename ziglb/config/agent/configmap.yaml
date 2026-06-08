@@ -14,5 +14,4 @@ data:
         neighbor-address = "127.0.0.1"
         peer-as = 65001
       [neighbors.transport.config]
-        remote-port = 179
         passive-mode = true

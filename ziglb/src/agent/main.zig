@@ -52,16 +52,24 @@ pub fn main(init: std.process.Init) !void {
         &event_queue,
     );
 
+    const as_number_str = environ_map.get("AS_NUMBER") orelse "65001";
+    const as_number = try std.fmt.parseInt(u32, as_number_str, 10);
+    const router_id_str = environ_map.get("ROUTER_ID") orelse "172.18.0.3";
+    const router_id = try std.Io.net.IpAddress.parseIp4(router_id_str, 0);
+
     var speaker = try bgp.Speaker.init(allocator, io, .{
-        .as_number = 65001,
-        .router_id = .{ 10, 0, 0, 1 },
-        .listen_port = 179,
+        .as_number = as_number,
+        .router_id = router_id.ip4.bytes,
     });
     defer speaker.deinit();
 
+    const peer_as_number_str = environ_map.get("PEER_AS_NUMBER") orelse "65002";
+    const peer_as_number = try std.fmt.parseInt(u32, peer_as_number_str, 10);
+    const peer_addr_str = environ_map.get("PEER_ADDR") orelse "127.0.0.1";
+    const peer_addr = try std.Io.net.IpAddress.parseIp4(peer_addr_str, 179);
     try speaker.addPeer(.{
-        .address = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 1790), // must peer sidecar
-        .remote_as = 65002,
+        .address = peer_addr,
+        .remote_as = peer_as_number,
     });
 
     var sr = try reconciler.ServiceReconciler.init(allocator, io, typed_client, &event_queue, &speaker);

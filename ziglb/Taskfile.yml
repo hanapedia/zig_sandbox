@@ -96,6 +96,8 @@ tasks:
     cmds:
       - kustomize build config/operator | kubectl apply -f -
       - kustomize build config/agent | kubectl apply -f -
+      - kubectl wait pod --for=condition=Ready -l app=ziglb-operator --timeout=60s
+      - kubectl wait pod --for=condition=Ready -l app=ziglb-agent --timeout=60s
 
   k8s:delete:
     desc: Delete Kubernetes resources
@@ -124,4 +126,44 @@ tasks:
   kind:stop:
     desc: stop kind cluster
     cmds:
-      - kind delete cluster --name {{.CLUSTER_NAME}}
+      - kind delete cluster --name {{.CLUSTER_NAME}} || true
+
+  external:run:
+    desc: Run external router
+    deps: [debug:build]
+    cmds:
+      - >
+        docker run -d --rm
+        --name router
+        --network kind
+        --ip 172.18.255.1
+        --volume $(pwd)/external/router_bird.conf:/etc/bird/router_bird.conf
+        --cap-add NET_ADMIN
+        {{.DEBUG_IMAGE_NAME}}:{{.IMAGE_TAG}} /usr/sbin/bird -d -c /etc/bird/router_bird.conf
+
+  external:kill:
+    desc: Kill external router
+    cmds:
+      - docker kill router || true
+
+  connectivity-test:setup:
+    desc: Setup LB Service connectivity test
+    cmds:
+      - task kind:stop
+      - task kind:start
+      - task image:load
+      - task external:kill
+      - task external:run
+      - task k8s:deploy
+      - kubectl apply -f config/lb.yaml
+      - kubectl apply -f config/client.yaml
+      - sleep 5
+
+  connectivity-test:run:
+    desc: Run LB Service connectivity test
+    vars:
+      LB_IP:
+        sh: kubectl get svc lb -oyaml | yq .status.loadBalancer.ingress[0].ip
+    cmds:
+      - docker exec -it router curl {{.LB_IP}}
+      - kubectl exec http-client -it -- curl lb.default.svc.cluster.local
