@@ -16,11 +16,14 @@ Two components.
 
 ## Running connectivity test
 connectivity-test:setup task deploys the following in docker environment:
-    - 2 node kind cluster
-    - external client container in the same network as the kind cluster
-    - ziglb-operator
-    - ziglb-agent
-connectivity-test:run task tests ziglb's ability to provide LoadBalancer IP allocation and routing.
+- 2 node kind cluster
+- external client container in the same network as the kind cluster
+- ziglb-operator
+- ziglb-agent
+connectivity-test:run task tests the following capabilities of ziglb:
+- provide LoadBalancer IP allocation and routing
+- regression test for cluster ip
+
 ```sh
 $ task connectivity-test:setup
 $ task connectivity-test:run

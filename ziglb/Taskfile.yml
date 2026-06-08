@@ -151,5 +151,6 @@ tasks:
       LB_IP:
         sh: kubectl get svc lb -oyaml | yq .status.loadBalancer.ingress[0].ip
     cmds:
-      - docker exec -it router curl {{.LB_IP}}
       - kubectl exec http-client -it -- curl lb.default.svc.cluster.local
+      - docker exec -it router curl {{.LB_IP}}
+      - docker exec -it router ip r show to {{.LB_IP}} 
