@@ -3,7 +3,7 @@ const std = @import("std");
 pub const LocalConfig = struct {
     as_number: u32,
     router_id: [4]u8,
-    listen_port: u16 = 179,
+    listen_port: ?u16 = null,
 };
 
 pub const PeerConfig = struct {

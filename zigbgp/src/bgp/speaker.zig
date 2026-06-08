@@ -69,10 +69,12 @@ pub const Speaker = struct {
     }
 
     pub fn run(self: *Self) !void {
-        const address = try std.Io.net.IpAddress.parseIp4("0.0.0.0", self.cfg.listen_port);
-        self.server = try address.listen(self.io, .{
-            .reuse_address = true,
-        });
+        if (self.cfg.listen_port) |lp| {
+            const address = try std.Io.net.IpAddress.parseIp4("0.0.0.0", lp);
+            self.server = try address.listen(self.io, .{
+                .reuse_address = true,
+            });
+        }
         self.running.store(true, .seq_cst);
         var peer_group = std.Io.Group.init;
         defer peer_group.cancel(self.io);
