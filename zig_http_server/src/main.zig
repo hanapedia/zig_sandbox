@@ -29,7 +29,7 @@ fn handleClient(stream: zio.net.Stream) !void {
         };
         std.log.info("{t} {s}", .{ request.head.method, request.head.target });
 
-        try request.respond("hello", .{ .status = .ok });
+        try request.respond("hello\n", .{ .status = .ok });
 
         // If the client doesn't want keep-alive, close the connection
         if (!request.head.keep_alive) {
