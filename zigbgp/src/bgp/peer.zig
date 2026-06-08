@@ -296,10 +296,10 @@ pub const Peer = struct {
 pub fn openFromConfig(local_cfg: config.LocalConfig, peer_cfg: config.PeerConfig) open.Open {
     return open.Open{
         .version = open.BGP_VERSION,
-        .my_as = if (local_cfg.as_number > open.MAX_2_OCTET_AS) open.AS_TRANS else @intCast(local_cfg.as_number),
+        .my_as = open.AS_TRANS,
         .hold_time = peer_cfg.hold_time,
         .bgp_id = local_cfg.router_id,
-        .four_octet_as = if (local_cfg.as_number > open.MAX_2_OCTET_AS) local_cfg.as_number else null,
+        .four_octet_as = local_cfg.as_number,
         .mp_ipv4_unicast = true,
     };
 }
