@@ -1,0 +1,15 @@
+version: '3'
+
+vars:
+  IMAGE_NAME: apline-c-headers
+
+tasks:
+  build:
+    desc: Build the image
+    cmds:
+      - docker build -t {{.IMAGE_NAME}} -f Dockerfile .
+
+  cp:
+    desc: Copy the c headers from alpine
+    cmds:
+      - docker run --rm -v "{{.DEST}}:/workspace" {{.IMAGE_NAME}} sh -c 'cp {{.SRC}} /workspace/'
