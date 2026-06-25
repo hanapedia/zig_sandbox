@@ -5,8 +5,41 @@ pub const AttrHeader = extern struct {
     len: u16,
     type: u16,
 
-    pub const ALIGNTO = 4;
+    pub const ALIGNTO: usize = 4;
 };
+
+/// Generic attribute decoder for netlink attribute-set structs.
+/// Assumptions:
+/// - T is a struct with all optional fields defaulting to null
+/// - T has a pub const Enum of type enum(u16) mapping attribute names to nla_type values
+/// - Field names in T match the corresponding Enum member names exactly
+/// - buf contains only the attribute payload (nlmsghdr and any fixed header already stripped)
+/// - buf is valid for the lifetime of the returned T (string/binary fields are zero-copy slices into buf)
+/// - Unknown nla_types in buf are silently skipped
+/// - Each attribute appears at most once; duplicate nla_types overwrite earlier values
+pub fn decode(comptime T: type, buf: []const u8) !T {
+    comptime {
+        if (@typeInfo(T) != .@"struct") @compileError("decode requires a struct type");
+        if (!@hasDecl(T, "Enum")) @compileError("decode requires T to have a pub const Enum");
+    }
+    var result: T = .{};
+    var offset: usize = 0;
+    while (offset < buf.len) {
+        const header = std.mem.bytesToValue(AttrHeader, buf[offset..][0..@sizeOf(AttrHeader)]);
+        const len: usize = @intCast(header.len);
+
+        const value_bytes = buf[offset + @sizeOf(AttrHeader) .. offset + len];
+        inline for (std.meta.fields(T)) |field| {
+            if (@intFromEnum(@field(T.Enum, field.name)) == header.type) {
+                @field(result, field.name) = try field.type.decode(value_bytes);
+            }
+        }
+
+        offset += std.mem.alignForward(usize, len, AttrHeader.ALIGNTO);
+    }
+
+    return result;
+}
 
 /// TODO: consideration for non-host endian fields
 pub fn ScalarAttr(attr_type: spec.AttributeTypes) type {
@@ -44,12 +77,13 @@ pub fn ScalarAttr(attr_type: spec.AttributeTypes) type {
                 inline .u8, .u16, .u32, .u64, .s32, .uint => |k| {
                     const U = comptime k.asZigType();
                     std.mem.writeInt(U, buf[0..@sizeOf(U)], self.value, .little);
+                    return @sizeOf(U);
                 },
                 .string, .binary => {
                     @memcpy(buf[0..self.value.len], self.value);
                     return self.value.len;
                 },
-                .flag => {}, // no data, just attr header.
+                .flag => return 0, // no data, just attr header.
                 else => unreachable,
             }
         }
