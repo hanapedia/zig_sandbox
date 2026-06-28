@@ -150,3 +150,25 @@ pub fn EnumAttr(T: type) type {
         }
     };
 }
+
+pub fn NestedAttr(T: type) type {
+    comptime {
+        if (@typeInfo(T) != .@"struct") @compileError("NestedAttr requires a struct type");
+        if (!@hasDecl(T, "Enum")) @compileError("NestedAttr requires T to have a pub const Enum");
+        if (!@hasDecl(T, "decode")) @compileError("NestedAttr requires T to have a decode method");
+        if (!@hasDecl(T, "encode")) @compileError("NestedAttr requires T to have an encode method");
+    }
+
+    return struct {
+        const Self = @This();
+        value: T,
+
+        pub fn decode(buf: []const u8) !Self {
+            return Self{ .value = try T.decode(buf) };
+        }
+
+        pub fn encode(self: Self, buf: []u8) !usize {
+            return T.encode(self.value, buf);
+        }
+    };
+}
