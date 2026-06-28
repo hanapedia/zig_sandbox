@@ -25,9 +25,12 @@ pub fn decode(comptime T: type, buf: []const u8) !T {
     var result: T = .{};
     var offset: usize = 0;
     while (offset < buf.len) {
+        if (offset + @sizeOf(AttrHeader) > buf.len) return error.BufferTooSmall;
         const header = std.mem.bytesToValue(AttrHeader, buf[offset..][0..@sizeOf(AttrHeader)]);
         const len: usize = @intCast(header.len);
+        if (len < @sizeOf(AttrHeader)) return error.InvalidAttrLen;
 
+        if (offset + len > buf.len) return error.BufferTooSmall;
         const value_bytes = buf[offset + @sizeOf(AttrHeader) .. offset + len];
         inline for (std.meta.fields(T)) |field| {
             if (@intFromEnum(@field(T.Enum, field.name)) == header.type) {
@@ -57,6 +60,7 @@ pub fn encode(comptime T: type, obj: T, buf: []u8) !usize {
 
     var offset: usize = 0;
     inline for (std.meta.fields(T)) |field_meta| {
+        if (offset + @sizeOf(AttrHeader) > buf.len) return error.BufferTooSmall;
         const field = @field(obj, field_meta.name) orelse continue;
         const len = try field.encode(buf[offset + @sizeOf(AttrHeader) ..]);
         const header = AttrHeader{
@@ -86,6 +90,7 @@ pub fn ScalarAttr(attr_type: spec.AttributeTypes) type {
 
         /// buf content is not copied. caller must keep buf until done using.
         pub fn decode(buf: []const u8) !Self {
+            if (buf.len < @sizeOf(T)) return error.BufferTooSmall;
             const value: T = switch (kind) {
                 .u8 => std.mem.readInt(u8, buf[0..@sizeOf(u8)], .little),
                 .u16 => std.mem.readInt(u16, buf[0..@sizeOf(u16)], .little),
@@ -105,10 +110,12 @@ pub fn ScalarAttr(attr_type: spec.AttributeTypes) type {
             switch (kind) {
                 inline .u8, .u16, .u32, .u64, .s32, .uint => |k| {
                     const U = comptime k.asZigType();
+                    if (buf.len < @sizeOf(U)) return error.BufferTooSmall;
                     std.mem.writeInt(U, buf[0..@sizeOf(U)], self.value, .little);
                     return @sizeOf(U);
                 },
                 .string, .binary => {
+                    if (buf.len < self.value.len) return error.BufferTooSmall;
                     @memcpy(buf[0..self.value.len], self.value);
                     return self.value.len;
                 },
@@ -131,11 +138,13 @@ pub fn EnumAttr(T: type) type {
         const Tag = @typeInfo(T).@"enum".tag_type;
 
         pub fn decode(buf: []const u8) !Self {
+            if (buf.len < @sizeOf(Tag)) return error.BufferTooSmall;
             const value: Tag = std.mem.readInt(Tag, buf[0..@sizeOf(Tag)], .little);
             return Self{ .value = @enumFromInt(value) };
         }
 
         pub fn encode(self: Self, buf: []u8) !usize {
+            if (buf.len < @sizeOf(Tag)) return error.BufferTooSmall;
             std.mem.writeInt(Tag, buf[0..@sizeOf(Tag)], @intFromEnum(self.value), .little);
             return @sizeOf(Tag);
         }
