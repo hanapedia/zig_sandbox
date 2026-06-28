@@ -41,6 +41,35 @@ pub fn decode(comptime T: type, buf: []const u8) !T {
     return result;
 }
 
+/// Generic attribute encoder for netlink attribute-set structs.
+/// Assumptions:
+/// - T is a struct with all optional fields defaulting to null
+/// - T has a pub const Enum of type enum(u16) mapping attribute names to nla_type values
+/// - Field names in T match the corresponding Enum member names exactly
+/// - buf is large enough to hold all encoded attributes including headers and alignment padding
+/// - Null fields are skipped and not written to buf
+/// - Each attribute is padded to AttrHeader.ALIGNTO byte alignment on the wire
+pub fn encode(comptime T: type, obj: T, buf: []u8) !usize {
+    comptime {
+        if (@typeInfo(T) != .@"struct") @compileError("encode requires a struct type");
+        if (!@hasDecl(T, "Enum")) @compileError("encode requires T to have a pub const Enum");
+    }
+
+    var offset: usize = 0;
+    inline for (std.meta.fields(T)) |field_meta| {
+        const field = @field(obj, field_meta.name) orelse continue;
+        const len = try field.encode(buf[offset + @sizeOf(AttrHeader) ..]);
+        const header = AttrHeader{
+            .len = @intCast(@sizeOf(AttrHeader) + len),
+            .type = @intFromEnum(@field(T.Enum, field_meta.name)),
+        };
+
+        @memcpy(buf[offset..][0..@sizeOf(AttrHeader)], std.mem.asBytes(&header)); // write header
+        offset += std.mem.alignForward(usize, @sizeOf(AttrHeader) + len, AttrHeader.ALIGNTO);
+    }
+    return offset;
+}
+
 /// TODO: consideration for non-host endian fields
 pub fn ScalarAttr(attr_type: spec.AttributeTypes) type {
     const T = attr_type.asZigType();
