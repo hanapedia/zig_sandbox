@@ -17,7 +17,7 @@ pub const AttrHeader = extern struct {
 /// - buf is valid for the lifetime of the returned T (string/binary fields are zero-copy slices into buf)
 /// - Unknown nla_types in buf are silently skipped
 /// - Each attribute appears at most once; duplicate nla_types overwrite earlier values
-pub fn decode(comptime T: type, buf: []const u8) !T {
+pub fn genericDecode(comptime T: type, buf: []const u8) !T {
     comptime {
         if (@typeInfo(T) != .@"struct") @compileError("decode requires a struct type");
         if (!@hasDecl(T, "Enum")) @compileError("decode requires T to have a pub const Enum");
@@ -34,7 +34,8 @@ pub fn decode(comptime T: type, buf: []const u8) !T {
         const value_bytes = buf[offset + @sizeOf(AttrHeader) .. offset + len];
         inline for (std.meta.fields(T)) |field| {
             if (@intFromEnum(@field(T.Enum, field.name)) == header.type) {
-                @field(result, field.name) = try field.type.decode(value_bytes);
+                const FieldType = @typeInfo(field.type).optional.child;
+                @field(result, field.name) = try FieldType.decode(value_bytes);
             }
         }
 
@@ -52,7 +53,7 @@ pub fn decode(comptime T: type, buf: []const u8) !T {
 /// - buf is large enough to hold all encoded attributes including headers and alignment padding
 /// - Null fields are skipped and not written to buf
 /// - Each attribute is padded to AttrHeader.ALIGNTO byte alignment on the wire
-pub fn encode(comptime T: type, obj: T, buf: []u8) !usize {
+pub fn genericEncode(comptime T: type, obj: T, buf: []u8) !usize {
     comptime {
         if (@typeInfo(T) != .@"struct") @compileError("encode requires a struct type");
         if (!@hasDecl(T, "Enum")) @compileError("encode requires T to have a pub const Enum");
@@ -60,16 +61,17 @@ pub fn encode(comptime T: type, obj: T, buf: []u8) !usize {
 
     var offset: usize = 0;
     inline for (std.meta.fields(T)) |field_meta| {
-        if (offset + @sizeOf(AttrHeader) > buf.len) return error.BufferTooSmall;
-        const field = @field(obj, field_meta.name) orelse continue;
-        const len = try field.encode(buf[offset + @sizeOf(AttrHeader) ..]);
-        const header = AttrHeader{
-            .len = @intCast(@sizeOf(AttrHeader) + len),
-            .type = @intFromEnum(@field(T.Enum, field_meta.name)),
-        };
+        if (@field(obj, field_meta.name)) |field| {
+            if (offset + @sizeOf(AttrHeader) > buf.len) return error.BufferTooSmall;
+            const len = try field.encode(buf[offset + @sizeOf(AttrHeader) ..]);
+            const header = AttrHeader{
+                .len = @intCast(@sizeOf(AttrHeader) + len),
+                .type = @intFromEnum(@field(T.Enum, field_meta.name)),
+            };
 
-        @memcpy(buf[offset..][0..@sizeOf(AttrHeader)], std.mem.asBytes(&header)); // write header
-        offset += std.mem.alignForward(usize, @sizeOf(AttrHeader) + len, AttrHeader.ALIGNTO);
+            @memcpy(buf[offset..][0..@sizeOf(AttrHeader)], std.mem.asBytes(&header)); // write header
+            offset += std.mem.alignForward(usize, @sizeOf(AttrHeader) + len, AttrHeader.ALIGNTO);
+        }
     }
     return offset;
 }
@@ -90,14 +92,11 @@ pub fn ScalarAttr(attr_type: spec.AttributeTypes) type {
 
         /// buf content is not copied. caller must keep buf until done using.
         pub fn decode(buf: []const u8) !Self {
-            if (buf.len < @sizeOf(T)) return error.BufferTooSmall;
             const value: T = switch (kind) {
-                .u8 => std.mem.readInt(u8, buf[0..@sizeOf(u8)], .little),
-                .u16 => std.mem.readInt(u16, buf[0..@sizeOf(u16)], .little),
-                .u32 => std.mem.readInt(u32, buf[0..@sizeOf(u32)], .little),
-                .u64 => std.mem.readInt(u64, buf[0..@sizeOf(u64)], .little),
-                .s32 => std.mem.readInt(i32, buf[0..@sizeOf(i32)], .little),
-                .uint => std.mem.readInt(u32, buf[0..@sizeOf(u32)], .little),
+                inline .u8, .u16, .u32, .u64, .s32, .uint => ints: {
+                    if (buf.len < @sizeOf(T)) return error.BufferTooSmall;
+                    break :ints std.mem.readInt(T, buf[0..@sizeOf(T)], .little);
+                },
                 .string => buf,
                 .binary => buf,
                 .flag => true,
@@ -171,4 +170,83 @@ pub fn NestedAttr(T: type) type {
             return T.encode(self.value, buf);
         }
     };
+}
+
+test "ScalarAttr u32 encode decode round trip" {
+    const TestEnum = enum(u16) { mtu = 1, _ };
+    const TestAttrs = struct {
+        pub const Enum = TestEnum;
+        mtu: ?ScalarAttr(.u32) = null,
+    };
+
+    var buf: [64]u8 = std.mem.zeroes([64]u8);
+    const input = TestAttrs{ .mtu = .{ .value = 1500 } };
+
+    const written = try genericEncode(TestAttrs, input, &buf);
+    const result = try genericDecode(TestAttrs, buf[0..written]);
+
+    try std.testing.expectEqual(@as(u32, 1500), result.mtu.?.value);
+}
+
+test "ScalarAttr string encode decode round trip" {
+    const TestEnum = enum(u16) { ifname = 1, _ };
+    const TestAttrs = struct {
+        pub const Enum = TestEnum;
+        ifname: ?ScalarAttr(.string) = null,
+    };
+
+    var buf: [64]u8 = std.mem.zeroes([64]u8);
+    const input = TestAttrs{ .ifname = .{ .value = "eth0" } };
+
+    const written = try genericEncode(TestAttrs, input, &buf);
+    const result = try genericDecode(TestAttrs, buf[0..written]);
+
+    try std.testing.expectEqualStrings("eth0", result.ifname.?.value);
+}
+
+test "null fields are skipped in encode" {
+    const TestEnum = enum(u16) { mtu = 1, ifname = 2, _ };
+    const TestAttrs = struct {
+        pub const Enum = TestEnum;
+        mtu: ?ScalarAttr(.u32) = null,
+        ifname: ?ScalarAttr(.string) = null,
+    };
+
+    var buf: [64]u8 = std.mem.zeroes([64]u8);
+    const input = TestAttrs{ .mtu = .{ .value = 42 } };
+
+    const written = try genericEncode(TestAttrs, input, &buf);
+    const result = try genericDecode(TestAttrs, buf[0..written]);
+
+    try std.testing.expectEqual(@as(u32, 42), result.mtu.?.value);
+    try std.testing.expect(result.ifname == null);
+}
+
+test "NestedAttr encode decode round trip" {
+    const InnerEnum = enum(u16) { speed = 1, _ };
+    const InnerAttrs = struct {
+        pub const Enum = InnerEnum;
+        speed: ?ScalarAttr(.u32) = null,
+
+        pub fn decode(buf: []const u8) !@This() {
+            return genericDecode(@This(), buf);
+        }
+        pub fn encode(self: @This(), buf: []u8) !usize {
+            return genericEncode(@This(), self, buf);
+        }
+    };
+
+    const OuterEnum = enum(u16) { link = 1, _ };
+    const OuterAttrs = struct {
+        pub const Enum = OuterEnum;
+        link: ?NestedAttr(InnerAttrs) = null,
+    };
+
+    var buf: [64]u8 = std.mem.zeroes([64]u8);
+    const input = OuterAttrs{ .link = .{ .value = .{ .speed = .{ .value = 1000 } } } };
+
+    const written = try genericEncode(OuterAttrs, input, &buf);
+    const result = try genericDecode(OuterAttrs, buf[0..written]);
+
+    try std.testing.expectEqual(@as(u32, 1000), result.link.?.value.speed.?.value);
 }
