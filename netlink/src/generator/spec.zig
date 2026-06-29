@@ -53,12 +53,6 @@ pub const MemberTypes = enum {
     pad,
 
     pub fn asZigTypeStr(self: MemberTypes) []const u8 {
-        comptime {
-            switch (self) {
-                .pad => @compileError("asZigTypeStr does not support .pad"),
-                else => {},
-            }
-        }
         return switch (self) {
             .u8 => "u8",
             .u16 => "u16",
@@ -135,12 +129,6 @@ pub const AttributeTypes = enum {
     }
 
     pub fn asZigTypeStr(self: AttributeTypes) ![]const u8 {
-        comptime {
-            switch (self) {
-                .nest, .@"sub-message", .@"indexed-array", .pad => @compileError("asZigType does not support non-scalar type"),
-                else => {},
-            }
-        }
         return switch (self) {
             .u8 => "u8",
             .u16 => "u16",
