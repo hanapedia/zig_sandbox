@@ -29,8 +29,8 @@ pub fn generate(allocator: std.mem.Allocator, writer: *std.Io.Writer, spec: s.Sp
 
     var attr_set_map = try AttributeSetsMap.init(allocator, spec.@"attribute-sets");
     defer attr_set_map.deinit();
-    try generateAttributeSetEnums(allocator, writer, attr_set_map);
-    // try generateOperations(allocator, writer, spec.operations);
+    try generateAttributeSet(allocator, writer, attr_set_map);
+    try generateOperations(allocator, writer, attr_set_map, spec.operations);
 }
 
 pub fn generateDefinitions(allocator: std.mem.Allocator, writer: *std.Io.Writer, defs: []s.Definition) !void {
@@ -71,7 +71,7 @@ pub fn writeDefinitionEnum(allocator: std.mem.Allocator, writer: *std.Io.Writer,
             try writer.print("{s},\n", .{entry_name});
         }
     }
-    try writer.print("}};\n", .{});
+    try writer.print("}};\n\n", .{});
 }
 
 pub fn writeDefinitionStruct(allocator: std.mem.Allocator, writer: *std.Io.Writer, def: s.Definition) !void {
@@ -101,7 +101,7 @@ pub fn writeDefinitionStruct(allocator: std.mem.Allocator, writer: *std.Io.Write
             }
         }
     }
-    try writer.print("}};\n", .{});
+    try writer.print("}};\n\n", .{});
 }
 
 pub fn writeDefinitionFlags(allocator: std.mem.Allocator, writer: *std.Io.Writer, def: s.Definition) !void {
@@ -130,7 +130,7 @@ pub fn writeDefinitionFlags(allocator: std.mem.Allocator, writer: *std.Io.Writer
     defer allocator.free(pad_type);
     try writeStructField(writer, "_padding", pad_type, 1, null);
 
-    try writer.print("}};\n", .{});
+    try writer.print("}};\n\n", .{});
 }
 
 const IndexedAttributeSet = struct {
@@ -141,16 +141,31 @@ const IndexedAttributeSet = struct {
 const AttributeSetsMap = struct {
     data: std.StringHashMap(IndexedAttributeSet),
 
+    // TODO: run the loop twice to fill the subset attributes sets
     pub fn init(allocator: std.mem.Allocator, attr_sets: []s.AttributeSet) !AttributeSetsMap {
         var attr_set_map = std.StringHashMap(IndexedAttributeSet).init(allocator);
+        var child_attr_sets: std.ArrayList(s.AttributeSet) = .empty;
+        defer child_attr_sets.deinit(allocator);
         for (attr_sets) |attr_set| {
             var attr_map = std.StringHashMap(s.Attribute).init(allocator);
-            if (attr_set.@"subset-of" == null) {
-                if (attr_set.attributes) |attrs| {
-                    for (attrs) |attr| {
-                        try attr_map.put(attr.name, attr);
-                    }
+            if (attr_set.@"subset-of" != null) {
+                try child_attr_sets.append(allocator, attr_set);
+                continue;
+            }
+            if (attr_set.attributes) |attrs| {
+                for (attrs) |attr| {
+                    try attr_map.put(attr.name, attr);
                 }
+            }
+            try attr_set_map.put(attr_set.name, .{ .attr_set = attr_set, .attr_map = attr_map });
+        }
+
+        for (child_attr_sets.items) |attr_set| {
+            var attr_map = std.StringHashMap(s.Attribute).init(allocator);
+            const parent = attr_set_map.get(attr_set.@"subset-of".?) orelse return error.UnknownAttributeSet;
+            for (attr_set.attributes.?) |attr| {
+                const parent_attr = parent.attr_map.get(attr.name) orelse return error.UnknownAttribute;
+                try attr_map.put(attr.name, parent_attr);
             }
             try attr_set_map.put(attr_set.name, .{ .attr_set = attr_set, .attr_map = attr_map });
         }
@@ -167,26 +182,30 @@ const AttributeSetsMap = struct {
     }
 };
 
-pub fn generateAttributeSetEnums(allocator: std.mem.Allocator, writer: *std.Io.Writer, attr_set_map: AttributeSetsMap) !void {
+// generates struct definitions for attribute set and enum definitions for attribute set fields.
+pub fn generateAttributeSet(allocator: std.mem.Allocator, writer: *std.Io.Writer, attr_set_map: AttributeSetsMap) !void {
     var it = attr_set_map.data.keyIterator();
     while (it.next()) |attr_set_name| {
-        const attr_set = attr_set_map.data.get(attr_set_name.*).?.attr_set;
-        const name = try toZigName(allocator, attr_set.name);
+        const idx_attr_set = attr_set_map.data.get(attr_set_name.*).?;
+        const name = try toZigName(allocator, idx_attr_set.attr_set.name);
         defer allocator.free(name);
-        try writer.print("pub const {s} = enum(u16) {{\n", .{name});
-
-        if (attr_set.@"subset-of") |_| {
-            const parent = attr_set_map.data.get(attr_set.@"subset-of".?) orelse return error.UnknownParentSet;
-            for (attr_set.attributes.?) |attr| {
-                const parent_attr = parent.attr_map.get(attr.name) orelse return error.UnknownAttribute;
-                try writeAttributeEnumEntry(allocator, writer, parent_attr);
-            }
-        } else {
-            for (attr_set.attributes.?) |attr| {
-                try writeAttributeEnumEntry(allocator, writer, attr);
-            }
+        const enum_name = try std.fmt.allocPrint(allocator, "{s}_fields", .{name});
+        defer allocator.free(enum_name);
+        try writer.print("pub const {s} = enum(u16) {{\n", .{enum_name});
+        for (idx_attr_set.attr_set.attributes.?) |attr| {
+            try writeAttributeEnumEntry(allocator, writer, attr);
         }
-        try writer.print("}};\n", .{});
+        try writer.print("}};\n\n", .{});
+
+        try writer.print("pub const {s} = struct {{\n", .{name});
+        for (idx_attr_set.attr_set.attributes.?) |_attr| {
+            const attr = idx_attr_set.attr_map.get(_attr.name) orelse return error.UnknownAttribute;
+            writeAttributeStructEntry(allocator, writer, attr) catch |err| {
+                std.debug.print("{s}", .{idx_attr_set.attr_set.name});
+                return err;
+            };
+        }
+        try writer.print("}};\n\n", .{});
     }
 }
 
@@ -197,4 +216,110 @@ pub fn writeAttributeEnumEntry(allocator: std.mem.Allocator, writer: *std.Io.Wri
     try writer.print("{s},\n", .{name});
 }
 
-// pub fn generateOperations(allocator: std.mem.Allocator, writer: std.Io.Writer, ops: s.Operations) !void {}
+pub fn writeAttributeStructEntry(allocator: std.mem.Allocator, writer: *std.Io.Writer, attr: s.Attribute) !void {
+    if (attr.@"enum") |enum_name| {
+        try writeAttributeStructEnumField(allocator, writer, attr.name, enum_name);
+        return;
+    }
+    if (attr.type == null) {
+        std.debug.print("{}\n\n", .{attr});
+        return error.UnknownAttribute;
+    }
+    switch (attr.type.?) {
+        .u8, .u16, .u32, .u64, .s32, .uint, .string, .binary, .flag => |t| try writeAttributeStructScalarField(allocator, writer, attr.name, t),
+        .nest => try writeAttributeStructNestedField(allocator, writer, attr.name, attr.@"nested-attributes"),
+        .pad => {},
+        .@"sub-message", .@"indexed-array" => {},
+    }
+}
+
+pub fn writeAttributeStructScalarField(allocator: std.mem.Allocator, writer: *std.Io.Writer, _name: []const u8, scalar_type: s.AttributeTypes) !void {
+    const name = try toZigName(allocator, _name);
+    defer allocator.free(name);
+
+    try indent(writer, 1);
+    try writer.print("{s}: codec.ScalarAttr({s}),\n", .{ name, scalar_type.asStr() });
+}
+
+// TODO: generate with struct type definition not the enum of fields
+pub fn writeAttributeStructNestedField(allocator: std.mem.Allocator, writer: *std.Io.Writer, _name: []const u8, _nested_type: ?[]const u8) !void {
+    if (_nested_type == null) return error.NestedTypeAttrSetNull;
+    const name = try toZigName(allocator, _name);
+    defer allocator.free(name);
+    const nested_type = try toZigName(allocator, _nested_type.?);
+    defer allocator.free(nested_type);
+
+    try indent(writer, 1);
+    try writer.print("{s}: codec.NestedAttr({s}),\n", .{ name, nested_type });
+}
+
+pub fn writeAttributeStructEnumField(allocator: std.mem.Allocator, writer: *std.Io.Writer, _name: []const u8, _enum_name: []const u8) !void {
+    const name = try toZigName(allocator, _name);
+    defer allocator.free(name);
+    const enum_name = try toZigName(allocator, _enum_name);
+    defer allocator.free(enum_name);
+
+    try indent(writer, 1);
+    try writer.print("{s}: codec.EnumAttr({s}),\n", .{ name, enum_name });
+}
+
+// TODO: add codec methods
+pub fn generateOperations(allocator: std.mem.Allocator, writer: *std.Io.Writer, attr_set_map: AttributeSetsMap, ops: s.Operations) !void {
+    for (ops.list) |op| {
+        // skip notify for now
+        if (op.notify) |_| continue;
+        if (op.@"attribute-set" == null) continue;
+
+        const attr_set = attr_set_map.data.get(op.@"attribute-set".?) orelse return error.UnknownAttributeSet;
+
+        // generate req/res types for Do
+        if (op.do) |do| {
+            if (do.request) |req| {
+                try writeOperationStructs(allocator, writer, op.name, attr_set, op.@"fixed-header", req.attributes, "do", "request");
+            }
+            if (do.reply) |reply| {
+                try writeOperationStructs(allocator, writer, op.name, attr_set, op.@"fixed-header", reply.attributes, "do", "reply");
+            }
+        }
+        // generate req/res types for Dump
+        if (op.dump) |dump| {
+            if (dump.request) |req| {
+                try writeOperationStructs(allocator, writer, op.name, attr_set, op.@"fixed-header", req.attributes, "dump", "request");
+            }
+            if (dump.reply) |reply| {
+                try writeOperationStructs(allocator, writer, op.name, attr_set, op.@"fixed-header", reply.attributes, "dump", "reply");
+            }
+        }
+    }
+}
+
+pub fn writeOperationStructs(
+    allocator: std.mem.Allocator,
+    writer: *std.Io.Writer,
+    op_name: []const u8,
+    attr_set: IndexedAttributeSet,
+    fixed_header: ?[]const u8,
+    attr_shorts: ?[]s.AttributeShort,
+    op_type: []const u8,
+    payload_type: []const u8,
+) !void {
+    const _name = try std.fmt.allocPrint(allocator, "{s}_{s}_{s}", .{ op_name, op_type, payload_type });
+    defer allocator.free(_name);
+    const name = try toZigName(allocator, _name);
+    defer allocator.free(name);
+    try writer.print("pub const {s} = struct {{\n", .{name});
+
+    if (fixed_header) |fh| {
+        const fh_name = try toZigName(allocator, fh);
+        defer allocator.free(fh_name);
+        try indent(writer, 1);
+        try writer.print("fixed_header: {s},\n", .{fh_name});
+    }
+    if (attr_shorts) |as| {
+        for (as) |attr_short| {
+            const attr = attr_set.attr_map.get(attr_short.name) orelse return error.UnknownAttribute;
+            try writeAttributeStructEntry(allocator, writer, attr);
+        }
+    }
+    try writer.print("}};\n\n", .{});
+}

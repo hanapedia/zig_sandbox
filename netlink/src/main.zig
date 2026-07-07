@@ -4,8 +4,12 @@ const nl = @import("netlink");
 const linux = std.os.linux;
 
 pub fn main(init: std.process.Init) !void {
-    const allocator = init.gpa;
+    // const allocator = init.gpa;
     const io = init.io;
+    var gpa = std.heap.DebugAllocator(.{ .stack_trace_frames = 16 }){};
+    defer _ = gpa.deinit();
+
+    const allocator = gpa.allocator();
     // test socket
     // try testSocket(allocator);
 

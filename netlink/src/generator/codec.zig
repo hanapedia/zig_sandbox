@@ -33,6 +33,7 @@ pub fn genericDecode(comptime T: type, buf: []const u8) !T {
         if (offset + len > buf.len) return error.BufferTooSmall;
         const value_bytes = buf[offset + @sizeOf(AttrHeader) .. offset + len];
         inline for (std.meta.fields(T)) |field| {
+            if (!@hasField(T.Enum, field.name)) continue;
             if (@intFromEnum(@field(T.Enum, field.name)) == header.type) {
                 const FieldType = @typeInfo(field.type).optional.child;
                 @field(result, field.name) = try FieldType.decode(value_bytes);
@@ -62,6 +63,7 @@ pub fn genericEncode(comptime T: type, obj: T, buf: []u8) !usize {
     var offset: usize = 0;
     inline for (std.meta.fields(T)) |field_meta| {
         if (@field(obj, field_meta.name)) |field| {
+            if (!@hasField(T.Enum, field_meta.name)) continue;
             if (offset + @sizeOf(AttrHeader) > buf.len) return error.BufferTooSmall;
             const len = try field.encode(buf[offset + @sizeOf(AttrHeader) ..]);
             const header = AttrHeader{

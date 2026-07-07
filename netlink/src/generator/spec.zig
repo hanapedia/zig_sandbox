@@ -142,6 +142,23 @@ pub const AttributeTypes = enum {
             else => unreachable,
         };
     }
+    pub fn asStr(self: AttributeTypes) []const u8 {
+        return switch (self) {
+            .u8 => ".u8",
+            .u16 => ".u16",
+            .u32 => ".u32",
+            .u64 => ".u64",
+            .s32 => ".s32",
+            .uint => ".uint",
+            .string => ".string",
+            .binary => ".binary",
+            .flag => ".flag",
+            .nest => ".nest",
+            .@"sub-message" => ".@\"sub-message\"",
+            .@"indexed-array" => ".@\"indexed-array\"",
+            .pad => ".pad",
+        };
+    }
 };
 
 pub const Checks = struct {
