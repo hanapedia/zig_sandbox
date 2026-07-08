@@ -24,7 +24,43 @@ fn writeStructField(writer: *std.Io.Writer, key: []const u8, val: []const u8, le
     try writer.print("{s}: {s},\n", .{ key, val });
 }
 
+fn writeStructStaticField(writer: *std.Io.Writer, key: []const u8, val: []const u8, level: usize, comment: ?[]const u8) !void {
+    if (comment) |c| {
+        try indent(writer, level);
+        try writer.print("/// {s}\n", .{c});
+    }
+    try indent(writer, level);
+    try writer.print("pub const {s} = {s};\n", .{ key, val });
+}
+
+fn writeImports(writer: *std.Io.Writer) !void {
+    try writer.print("const codec = @import(\"codec.zig\");\n\n", .{});
+}
+
+fn writeModuleDoc(writer: *std.Io.Writer, doc: ?[]const u8) !void {
+    if (doc) |d| try writer.print("/// {s}\n", .{d});
+}
+
+fn writeCodecMethods(writer: *std.Io.Writer) !void {
+    try indent(writer, 1);
+    try writer.print("pub fn decode(buf: []const u8) !@This() {{\n", .{});
+    try indent(writer, 2);
+    try writer.print("return codec.genericDecode(@This(), buf);\n", .{});
+    try indent(writer, 1);
+    try writer.print("}}\n\n", .{});
+
+    try indent(writer, 1);
+    try writer.print("pub fn encode(self: @This(), buf: []const u8) !usize {{\n", .{});
+    try indent(writer, 2);
+    try writer.print("return codec.genericEncode(@This(), self, buf);\n", .{});
+    try indent(writer, 1);
+    try writer.print("}}\n", .{});
+}
+
+/// generate zig types for the given netlink spec
 pub fn generate(allocator: std.mem.Allocator, writer: *std.Io.Writer, spec: s.Spec) !void {
+    try writeModuleDoc(writer, spec.doc);
+    try writeImports(writer);
     try generateDefinitions(allocator, writer, spec.definitions);
 
     var attr_set_map = try AttributeSetsMap.init(allocator, spec.@"attribute-sets");
@@ -198,6 +234,10 @@ pub fn generateAttributeSet(allocator: std.mem.Allocator, writer: *std.Io.Writer
         try writer.print("}};\n\n", .{});
 
         try writer.print("pub const {s} = struct {{\n", .{name});
+        // write the Enum field
+        try writeStructStaticField(writer, "Enum", enum_name, 1, "enum for mapping attr name to nla_type value");
+        try writer.print("\n", .{});
+
         for (idx_attr_set.attr_set.attributes.?) |_attr| {
             const attr = idx_attr_set.attr_map.get(_attr.name) orelse return error.UnknownAttribute;
             writeAttributeStructEntry(allocator, writer, attr) catch |err| {
@@ -205,6 +245,9 @@ pub fn generateAttributeSet(allocator: std.mem.Allocator, writer: *std.Io.Writer
                 return err;
             };
         }
+        // write the generic codec methods
+        try writer.print("\n", .{});
+        try writeCodecMethods(writer);
         try writer.print("}};\n\n", .{});
     }
 }
@@ -218,7 +261,7 @@ pub fn writeAttributeEnumEntry(allocator: std.mem.Allocator, writer: *std.Io.Wri
 
 pub fn writeAttributeStructEntry(allocator: std.mem.Allocator, writer: *std.Io.Writer, attr: s.Attribute) !void {
     if (attr.@"enum") |enum_name| {
-        try writeAttributeStructEnumField(allocator, writer, attr.name, enum_name);
+        try writeAttributeStructEnumField(allocator, writer, attr.name, enum_name, attr.doc);
         return;
     }
     if (attr.type == null) {
@@ -226,41 +269,49 @@ pub fn writeAttributeStructEntry(allocator: std.mem.Allocator, writer: *std.Io.W
         return error.UnknownAttribute;
     }
     switch (attr.type.?) {
-        .u8, .u16, .u32, .u64, .s32, .uint, .string, .binary, .flag => |t| try writeAttributeStructScalarField(allocator, writer, attr.name, t),
-        .nest => try writeAttributeStructNestedField(allocator, writer, attr.name, attr.@"nested-attributes"),
+        .u8, .u16, .u32, .u64, .s32, .uint, .string, .binary, .flag => |t| try writeAttributeStructScalarField(allocator, writer, attr.name, t, attr.doc),
+        .nest => try writeAttributeStructNestedField(allocator, writer, attr.name, attr.@"nested-attributes", attr.doc),
         .pad => {},
         .@"sub-message", .@"indexed-array" => {},
     }
 }
 
-pub fn writeAttributeStructScalarField(allocator: std.mem.Allocator, writer: *std.Io.Writer, _name: []const u8, scalar_type: s.AttributeTypes) !void {
+pub fn writeAttributeStructScalarField(allocator: std.mem.Allocator, writer: *std.Io.Writer, _name: []const u8, scalar_type: s.AttributeTypes, doc: ?[]const u8) !void {
     const name = try toZigName(allocator, _name);
     defer allocator.free(name);
 
-    try indent(writer, 1);
-    try writer.print("{s}: codec.ScalarAttr({s}),\n", .{ name, scalar_type.asStr() });
+    const val = try std.fmt.allocPrint(allocator, "codec.ScalarAttr({s})", .{scalar_type.asStr()});
+    defer allocator.free(val);
+
+    try writeStructField(writer, name, val, 1, doc);
 }
 
 // TODO: generate with struct type definition not the enum of fields
-pub fn writeAttributeStructNestedField(allocator: std.mem.Allocator, writer: *std.Io.Writer, _name: []const u8, _nested_type: ?[]const u8) !void {
+pub fn writeAttributeStructNestedField(allocator: std.mem.Allocator, writer: *std.Io.Writer, _name: []const u8, _nested_type: ?[]const u8, doc: ?[]const u8) !void {
     if (_nested_type == null) return error.NestedTypeAttrSetNull;
     const name = try toZigName(allocator, _name);
     defer allocator.free(name);
+
     const nested_type = try toZigName(allocator, _nested_type.?);
     defer allocator.free(nested_type);
 
-    try indent(writer, 1);
-    try writer.print("{s}: codec.NestedAttr({s}),\n", .{ name, nested_type });
+    const val = try std.fmt.allocPrint(allocator, "codec.NestedAttr({s})", .{nested_type});
+    defer allocator.free(val);
+
+    try writeStructField(writer, name, val, 1, doc);
 }
 
-pub fn writeAttributeStructEnumField(allocator: std.mem.Allocator, writer: *std.Io.Writer, _name: []const u8, _enum_name: []const u8) !void {
+pub fn writeAttributeStructEnumField(allocator: std.mem.Allocator, writer: *std.Io.Writer, _name: []const u8, _enum_name: []const u8, doc: ?[]const u8) !void {
     const name = try toZigName(allocator, _name);
     defer allocator.free(name);
+
     const enum_name = try toZigName(allocator, _enum_name);
     defer allocator.free(enum_name);
 
-    try indent(writer, 1);
-    try writer.print("{s}: codec.EnumAttr({s}),\n", .{ name, enum_name });
+    const val = try std.fmt.allocPrint(allocator, "codec.EnumAttr({s})", .{enum_name});
+    defer allocator.free(val);
+
+    try writeStructField(writer, name, val, 1, doc);
 }
 
 // TODO: add codec methods
@@ -275,19 +326,19 @@ pub fn generateOperations(allocator: std.mem.Allocator, writer: *std.Io.Writer, 
         // generate req/res types for Do
         if (op.do) |do| {
             if (do.request) |req| {
-                try writeOperationStructs(allocator, writer, op.name, attr_set, op.@"fixed-header", req.attributes, "do", "request");
+                try writeOperationStructs(allocator, writer, op.name, attr_set, op.@"fixed-header", req.attributes, "do", "request", op.doc);
             }
             if (do.reply) |reply| {
-                try writeOperationStructs(allocator, writer, op.name, attr_set, op.@"fixed-header", reply.attributes, "do", "reply");
+                try writeOperationStructs(allocator, writer, op.name, attr_set, op.@"fixed-header", reply.attributes, "do", "reply", op.doc);
             }
         }
         // generate req/res types for Dump
         if (op.dump) |dump| {
             if (dump.request) |req| {
-                try writeOperationStructs(allocator, writer, op.name, attr_set, op.@"fixed-header", req.attributes, "dump", "request");
+                try writeOperationStructs(allocator, writer, op.name, attr_set, op.@"fixed-header", req.attributes, "dump", "request", op.doc);
             }
             if (dump.reply) |reply| {
-                try writeOperationStructs(allocator, writer, op.name, attr_set, op.@"fixed-header", reply.attributes, "dump", "reply");
+                try writeOperationStructs(allocator, writer, op.name, attr_set, op.@"fixed-header", reply.attributes, "dump", "reply", op.doc);
             }
         }
     }
@@ -297,17 +348,27 @@ pub fn writeOperationStructs(
     allocator: std.mem.Allocator,
     writer: *std.Io.Writer,
     op_name: []const u8,
-    attr_set: IndexedAttributeSet,
+    idx_attr_set: IndexedAttributeSet,
     fixed_header: ?[]const u8,
     attr_shorts: ?[]s.AttributeShort,
     op_type: []const u8,
     payload_type: []const u8,
+    doc: ?[]const u8,
 ) !void {
     const _name = try std.fmt.allocPrint(allocator, "{s}_{s}_{s}", .{ op_name, op_type, payload_type });
     defer allocator.free(_name);
     const name = try toZigName(allocator, _name);
     defer allocator.free(name);
+
+    const attr_set_name = try toZigName(allocator, idx_attr_set.attr_set.name);
+    defer allocator.free(attr_set_name);
+    const enum_name = try std.fmt.allocPrint(allocator, "{s}_fields", .{attr_set_name});
+    defer allocator.free(enum_name);
+
+    if (doc) |d| try writer.print("/// {s}\n", .{d});
     try writer.print("pub const {s} = struct {{\n", .{name});
+    try writeStructStaticField(writer, "Enum", enum_name, 1, "enum for mapping attr name to nla_type value");
+    try writer.print("\n", .{});
 
     if (fixed_header) |fh| {
         const fh_name = try toZigName(allocator, fh);
@@ -317,9 +378,12 @@ pub fn writeOperationStructs(
     }
     if (attr_shorts) |as| {
         for (as) |attr_short| {
-            const attr = attr_set.attr_map.get(attr_short.name) orelse return error.UnknownAttribute;
+            const attr = idx_attr_set.attr_map.get(attr_short.name) orelse return error.UnknownAttribute;
             try writeAttributeStructEntry(allocator, writer, attr);
         }
     }
+    // write generic codec methods
+    try writer.print("\n", .{});
+    try writeCodecMethods(writer);
     try writer.print("}};\n\n", .{});
 }
