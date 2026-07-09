@@ -84,7 +84,7 @@ pub fn ScalarAttr(attr_type: spec.AttributeTypes) type {
     return struct {
         comptime {
             switch (attr_type) {
-                .nest, .@"sub-message", .@"indexed-array", .pad => @compileError("ScalarAttr does not support non-scalar type"),
+                .nest, .@"sub-message", .@"indexed-array", .pad, .unused => @compileError("ScalarAttr does not support non-scalar type"),
                 else => {},
             }
         }

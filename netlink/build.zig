@@ -34,6 +34,25 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| run_cmd.addArgs(args);
     b.step("run", "Run the demo").dependOn(&run_cmd.step);
 
+    // Code generator executable
+    const gen_exe = b.addExecutable(.{
+        .name = "gen",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/generator/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "netlink", .module = mod },
+            },
+        }),
+    });
+    b.installArtifact(gen_exe);
+
+    const gen_run = b.addRunArtifact(gen_exe);
+    gen_run.step.dependOn(b.getInstallStep());
+    if (b.args) |args| gen_run.addArgs(args);
+    b.step("gen", "Run the code generator").dependOn(&gen_run.step);
+
     // Tests: run both the library module and the exe module
     const lib_tests = b.addTest(.{
         .root_module = b.createModule(.{

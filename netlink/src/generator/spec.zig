@@ -9,7 +9,7 @@ pub const Spec = struct {
     @"attribute-sets": []AttributeSet,
     @"sub-messages": ?[]SubMessage = null,
     operations: Operations,
-    @"mcast-groups": MCastGroups,
+    @"mcast-groups": ?MCastGroups = null,
 };
 
 pub const Definition = struct {
@@ -106,11 +106,12 @@ pub const AttributeTypes = enum {
     @"sub-message",
     @"indexed-array",
     pad,
+    unused,
 
     pub fn asZigType(self: AttributeTypes) type {
         comptime {
             switch (self) {
-                .nest, .@"sub-message", .@"indexed-array", .pad => @compileError("asZigType does not support non-scalar type"),
+                .nest, .@"sub-message", .@"indexed-array", .pad, .unused => @compileError("asZigType does not support non-scalar type"),
                 else => {},
             }
         }
@@ -157,6 +158,7 @@ pub const AttributeTypes = enum {
             .@"sub-message" => ".@\"sub-message\"",
             .@"indexed-array" => ".@\"indexed-array\"",
             .pad => ".pad",
+            .unused => ".unused",
         };
     }
 };
@@ -203,13 +205,13 @@ pub const Dump = struct {
 };
 
 pub const Request = struct {
-    value: i64,
+    value: ?i64 = null,
     attributes: ?[]AttributeShort = null,
 };
 
 pub const Reply = struct {
-    value: i64,
-    attributes: []AttributeShort,
+    value: ?i64 = null,
+    attributes: ?[]AttributeShort = null,
 };
 
 pub const AttributeShort = struct {

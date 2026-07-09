@@ -34,7 +34,7 @@ fn writeStructStaticField(writer: *std.Io.Writer, key: []const u8, val: []const 
 }
 
 fn writeImports(writer: *std.Io.Writer) !void {
-    try writer.print("const codec = @import(\"codec.zig\");\n\n", .{});
+    try writer.print("const codec = @import(\"../codec.zig\");\n\n", .{});
 }
 
 fn writeModuleDoc(writer: *std.Io.Writer, doc: ?[]const u8) !void {
@@ -271,7 +271,7 @@ pub fn writeAttributeStructEntry(allocator: std.mem.Allocator, writer: *std.Io.W
     switch (attr.type.?) {
         .u8, .u16, .u32, .u64, .s32, .uint, .string, .binary, .flag => |t| try writeAttributeStructScalarField(allocator, writer, attr.name, t, attr.doc),
         .nest => try writeAttributeStructNestedField(allocator, writer, attr.name, attr.@"nested-attributes", attr.doc),
-        .pad => {},
+        .pad, .unused => {},
         .@"sub-message", .@"indexed-array" => {},
     }
 }
