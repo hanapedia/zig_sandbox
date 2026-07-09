@@ -1,0 +1,36 @@
+version: "3"
+
+vars:
+  UPSTREAM_DIR: src/generator/specs/upstream
+  PREPROCESSED_DIR: src/generator/specs/preprocessed
+  KERNEL_SPECS_BASE_URL: "https://raw.githubusercontent.com/torvalds/linux/master/Documentation/netlink/specs"
+  SPECS:
+    - rt-addr
+    - rt-link
+    - rt-neigh
+    - rt-route
+    - rt-rule
+
+tasks:
+  specs:download:
+    desc: Download YNL spec YAML files from the Linux kernel repo
+    cmds:
+      - mkdir -p {{.UPSTREAM_DIR}}
+      - for: {var: SPECS}
+        cmd: curl -fsSL {{.KERNEL_SPECS_BASE_URL}}/{{.ITEM}}.yaml -o {{.UPSTREAM_DIR}}/{{.ITEM}}.yaml
+
+  specs:preprocess:
+    desc: Convert upstream YAML specs to preprocessed JSON
+    cmds:
+      - mkdir -p {{.PREPROCESSED_DIR}}
+      - for: {var: SPECS}
+        cmd: >
+          yq -o json {{.UPSTREAM_DIR}}/{{.ITEM}}.yaml
+          | jq 'walk(if type == "array" and length > 0 and (.[0] | type) == "string" then map({name: .}) else . end)'
+          > {{.PREPROCESSED_DIR}}/{{.ITEM}}.json
+
+  specs:
+    desc: Download and preprocess all YNL specs
+    cmds:
+      - task: specs:download
+      - task: specs:preprocess
